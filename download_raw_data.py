@@ -675,7 +675,7 @@ if __name__ == "__main__":
     excel_path = "D:\\AQUMON\\us_symbol_list.xlsx"
     out_root = r"D:\AQUMON\data\\raw_data"
     # forms = ("4","6-K","8-K","10-K", "10-Q", "13F", "20-F", "40-F", "S-4",)
-    forms = ("4","6-K","8-K", "10-Q", "13F", "20-F", "40-F", "S-4",)
+    forms = ("4","6-K", "13F", "20-F", "40-F", "S-4",)
     # forms = ("6-K", "8-K",)
     min_delay = 1
     download_mode = "clean"  # "clean" uses download_text(), "raw" downloads all .txt attachments

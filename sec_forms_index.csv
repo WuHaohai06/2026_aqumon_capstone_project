@@ -33,8 +33,8 @@
 25,"Notification of the removal from listing and registration of matured, redeemed or retired securities (PDF)",March 2006,SEC1654,"Public Companies, Self-Regulatory Organizations",2
 3,Initial statement of beneficial ownership of securities (PDF),May 2019,SEC1473,"Directors, Officers, Securities Exchange Act of 1934, Significant Shareholders, Investors",2
 3,Initial statement of beneficial ownership of securities - general instructions (PDF),May 2019,SEC1472,"Directors, Officers, Securities Exchange Act of 1934, Significant Shareholders, Investors",2
-4,Statement of changes in beneficial ownership of securities - general instructions (PDF),Feb. 2025,SEC1475,"Directors, Officers, Significant Shareholders",2
 4,Statement of changes in beneficial ownership of securities (PDF),Feb. 2023,SEC1474,"Directors, Officers, Securities Exchange Act of 1934, Significant Shareholders, Investors",2
+4,Statement of changes in beneficial ownership of securities - general instructions (PDF),Feb. 2025,SEC1475,"Directors, Officers, Significant Shareholders",2
 40-F,Registration statement pursuant to Section 12 or annual report pursuant to Section 13(a) or 15(d) (PDF),Feb. 2025,SEC2285,"Securities Exchange Act of 1934, Public Companies, International",2
 5,Annual statement of changes in beneficial ownership of securities (PDF),Feb. 2023,SEC2270T,"Directors, Officers, Securities Exchange Act of 1934, Significant Shareholders, Investors",2
 5,Annual statement of changes in beneficial ownership of securities - general instructions (PDF),Feb. 2023,SEC2270,"Directors, Officers, Significant Shareholders",2
@@ -112,11 +112,11 @@ N-MFP,Monthly Schedule of Portfolio Holdings of Money Market Funds (PDF),Dec. 20
 N-PORT,Monthly Portfolio Investments Report (PDF),Dec. 2023,SEC 2940,"Investment Company Act of 1940, Investment Companies",5
 N-PX,Annual Report of Proxy Voting Record of Registered Management Investment Company (PDF),July 2024,SEC2451,"Investment Company Act of 1940, Investment Companies",5
 N-RN,Current Report For Registered Management Investment Companies and Business Development Companies (PDF),Aug. 2022,SEC 2941,"Investment Company Act of 1940, Investment Companies",5
-,Notice on Supplying Information Voluntarily (PDF),Aug. 2017,SEC2405,Other Forms and Materials,5
-,Supplemental Information for Persons Requested to Supply Information Voluntarily to the Office of Credit Ratings’Monitoring Staff (PDF),Sept. 2014,SEC2903,Securities Exchange Act of 1934,5
 ,Supplemental Information for Persons Requested to Supply Information Voluntarily or Directed to Supply Information Pursuant to a Commission Subpoena (PDF),Sept. 2021,SEC1662,Other Forms and Materials,5
 ,Supplemental Information for Regulated Entities Directed to Supply Information Other Than Pursuant to a Commission Subpoena (PDF),Sept. 2021,SEC1661,Other Forms and Materials,5
 ,Industry Guides (PDF),Jan. 2023,SEC2056,Other Forms and Materials,5
+,Notice on Supplying Information Voluntarily (PDF),Aug. 2017,SEC2405,Other Forms and Materials,5
+,Supplemental Information for Persons Requested to Supply Information Voluntarily to the Office of Credit Ratings’Monitoring Staff (PDF),Sept. 2014,SEC2903,Securities Exchange Act of 1934,5
 NRSRO,Application for Registration as a Nationally Recognized Statistical Rating Organization (NRSRO) (PDF),April 2015,SEC1541,NRSRO,5
 PF,Reporting Form for Investment Advisers to Private Funds and Certain Commodity Pool Operators and Commodity Trading Advisors (PDF),April 2025,SEC2048,"Investment Advisers Act of 1940, Investment Advisers",5
 PILOT,"Initial operation report, amendment to initial operation report and quarterly report for pilot trading systems operated by self-regulatory organizations (PDF)",Sept. 2013,SEC2552,Self-Regulatory Organizations,5
@@ -155,8 +155,8 @@ TH,Notification of Reliance on Temporary Hardship Exemption (PDF),July 2006,SEC2
 WB-APP,Application for Award for Original Information Submitted Pursuant to Section 21F of the Securities Exchange Act of 1934 (PDF),Aug. 2011,SEC2851,"Tips Complaints and Referrals, Whistleblower",7
 X-17A-19,Report of Change in Membership Status (PDF),July 2001,SEC1414,Self-Regulatory Organizations,7
 X-17A-5 Part I,"FOCUS Report, Part I (PDF)",April 2003,SEC1705,"Security-Based Swap Entities, Broker-Dealers",7
-X-17A-5 Part II,"FOCUS Report, Part II (PDF)",July 2024,SEC1695,"Security-Based Swap Entities, Broker-Dealers",7
 X-17A-5 Part II,"FOCUS Report, Part II Instructions (PDF)",Oct. 2021,SEC1695A,"Security-Based Swap Entities, Broker-Dealers",7
+X-17A-5 Part II,"FOCUS Report, Part II (PDF)",July 2024,SEC1695,"Security-Based Swap Entities, Broker-Dealers",7
 X-17A-5 Part IIA,FOCUS Report Part IIa Instructions (PDF),Nov. 2018,SEC1696A,"Security-Based Swap Entities, Broker-Dealers",7
 X-17A-5 Part IIA,FOCUS Report Part IIa (PDF),Nov. 2018,SEC1696,"Security-Based Swap Entities, Broker-Dealers",7
 X-17A-5 Part IIC,"FOCUS Report, Part IIC Instructions (PDF)",Oct. 2021,,Security-Based Swap Entities,7
