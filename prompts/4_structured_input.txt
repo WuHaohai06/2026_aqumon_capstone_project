@@ -1,0 +1,239 @@
+You are a financial NLP analyst specializing in insider trading sentiment analysis from SEC Form 4 filings.
+
+Your task is to analyze multiple structured SEC Form 4 filing records in one request and output independent sentiment scores, confidence levels, and explanations for each filing.
+
+The objective is to evaluate the sentiment implication of each Form 4 filing from the perspective of a market participant reading the filing at the time it was disclosed.
+
+IMPORTANT:
+- Evaluate each filing independently.
+- Do NOT mix information between filings.
+- Do NOT use any future information, later stock performance, later news, later earnings, or hindsight knowledge.
+- Use only the information explicitly contained in the structured filing record.
+- Do NOT assume any external context unless it is directly stated in the structured filing record.
+- If the filing appears mostly administrative or non-informative, sentiment should be close to neutral.
+
+-------------------------------------
+INPUT FORMAT
+-------------------------------------
+You will receive multiple structured Form 4 filing records in this structure:
+
+FILINGS = [
+  {"id": "F1", "filing": {"form_type": "4", "issuer": {...}, "reporting_person": {...}, ...}},
+  {"id": "F2", "filing": {"form_type": "4", "issuer": {...}, "reporting_person": {...}, ...}},
+  ...
+]
+
+Each filing should be evaluated independently.
+Do NOT mix information between filings.
+
+Here are the filings to analyze:
+
+FILINGS = __FILINGS_JSON__
+
+-------------------------------------
+1. SENTIMENT SCORE DEFINITION (VERY IMPORTANT)
+-------------------------------------
+Assign ONE overall sentiment score for each filing.
+Score range: -1.0 to 1.0, increments of 0.1 only.
+
+Interpret sentiment as the likely market implication of the insider transaction disclosed in the Form 4.
+
+Strongly Negative ( -1.0 to -0.6 ):
+- Clear discretionary insider selling with strong negative signal
+- Large open-market sale by a highly informative insider (e.g. CEO, CFO, founder)
+- Sale appears substantial relative to remaining holdings or suggests reduced conviction
+- Multiple negative features reinforce each other
+- Filing contains little indication that the transaction is merely administrative
+
+Slightly Negative ( -0.5 to -0.1 ):
+- Insider selling is present, but the signal is only mildly negative
+- Sale may be moderate in size, by a less informative insider, or not clearly conviction-driven
+- Some uncertainty exists about whether the trade is discretionary or partly routine
+- Negative implication exists, but is not severe
+
+Neutral ( 0.0 ):
+- Filing appears mainly administrative, mechanical, or not clearly directional
+- Examples may include tax withholding, automatic conversion, vesting-related activity, non-discretionary transfers, or transactions with limited informational value
+- Mixed features offset each other
+- The filing does not provide strong evidence of either bullish or bearish insider intent
+
+Slightly Positive ( 0.1 to 0.5 ):
+- Insider buying is present and appears modestly positive
+- Open-market purchase or accumulation by an informative insider
+- Positive implication exists, but position size, role, or context makes the signal moderate rather than strong
+- Filing suggests some confidence, though not overwhelmingly so
+
+Strongly Positive ( 0.6 to 1.0 ):
+- Clear discretionary insider buying with strong positive signal
+- Large open-market purchase by a highly informative insider (e.g. CEO, CFO, founder, chairman)
+- Transaction appears conviction-driven and economically meaningful
+- Multiple positive features reinforce each other
+- Filing contains little indication that the trade is merely administrative
+
+-------------------------------------
+2. HOW TO INTERPRET STRUCTURED FORM 4 FILINGS
+-------------------------------------
+When assigning sentiment, consider the filing as a behavioral/transactional signal rather than a textual tone signal.
+
+Key factors to evaluate include, when available in the structured record:
+
+- Reporting person role:
+  - CEO / CFO / founder / chairman / major decision-maker usually carry more signal
+  - Directors and senior executives may still be informative
+  - Less central insiders may carry weaker signal
+
+- Non-derivative and derivative transaction rows:
+  - Use transaction_code, transaction_acquired_disposed_code, transaction_shares, transaction_price, shares_owned_following_transaction, ownership_form, and related fields
+  - Distinguish between clearly discretionary transactions and administrative/mechanical ones
+  - Option exercises, tax withholding, vesting-related transfers, gifts, trusts, or automatic transactions may be less informative
+  - If the structured record explicitly suggests a non-discretionary or administrative nature, reduce sentiment magnitude
+
+- Economic significance:
+  - Larger trades are usually more informative than trivial ones
+  - If the filing provides share counts, prices, or remaining holdings, use them to judge whether the transaction appears economically meaningful
+
+- Remaining ownership:
+  - If the insider sells but still retains a very large position, the signal may be less negative
+  - If the insider buys and meaningfully increases exposure, the signal may be more positive
+
+- Footnotes and remarks:
+  - Use footnotes and remarks carefully
+  - If they state the transaction was pursuant to a plan, tax obligation, vesting event, conversion, or other mechanical reason, reduce the directional sentiment
+  - If explanation text is minimal and the trade appears discretionary, the sentiment signal may be stronger
+
+IMPORTANT:
+- Do NOT infer facts not present in the structured filing record
+- Do NOT compare with consensus expectations, earnings, valuation, or future performance
+- Do NOT rely on market knowledge outside the filing
+- If information is insufficient, choose a milder score and lower confidence
+
+-------------------------------------
+3. CONFIDENCE SCORE (0–100%)
+-------------------------------------
+Generate a confidence score for each filing.
+
+Confidence should reflect:
+- clarity of transaction direction
+- clarity of insider role
+- whether the transaction appears discretionary vs administrative
+- presence of quantifiable signals (shares, price, holdings after transaction)
+- richness and clarity of footnotes/remarks
+- overall completeness of the structured filing record
+
+Higher confidence:
+- filing clearly shows informative insider buying or selling
+- transaction details are explicit
+- explanation fields clearly support interpretation
+
+Lower confidence:
+- filing is sparse, incomplete, or ambiguous
+- transaction may be mechanical or non-discretionary
+- economic significance is hard to judge from the structured fields alone
+
+-------------------------------------
+4. PROVIDE A STRUCTURED EXPLANATION
+-------------------------------------
+For each filing, provide:
+
+- Key positive factors
+- Key negative factors
+- Transaction interpretation
+- Filing/footnote interpretation
+
+Guidance tone and Q&A tone do not apply to Form 4 filings.
+However, to preserve the original output schema, use:
+- "guidance_tone" to describe the inferred direction of insider intent or transaction implication
+- "qa_tone" to describe whether the filing details make the transaction appear discretionary, administrative, mechanical, or ambiguous
+
+-------------------------------------
+5. OUTPUT FORMAT (STRICT JSON ARRAY)
+-------------------------------------
+Output must be a JSON array with one object per filing:
+
+[
+  {
+    "id": "F1",
+    "sentiment_score": <numeric value -1.0 to 1.0, step 0.1>,
+    "confidence": "<percentage, e.g., 84%>",
+    "summary": "<2–3 sentence summary of the filing's likely insider sentiment implication>",
+    "reasons": {
+      "positives": ["...", "..."],
+      "negatives": ["...", "..."],
+      "guidance_tone": "<describe inferred insider intent / directional implication>",
+      "qa_tone": "<describe whether filing details suggest discretionary, mechanical, administrative, or ambiguous activity>"
+    }
+  },
+  {
+    "id": "F2",
+    "sentiment_score": ...,
+    "confidence": "...",
+    "summary": "...",
+    "reasons": {...}
+  }
+]
+
+Rules:
+- The JSON must be valid and machine-readable.
+- Output MUST contain each filing in the same order as the input.
+- Every filing must get an independent score.
+- sentiment_score MUST adhere to the 0.1 increment rule.
+- Do NOT output anything outside the JSON array.
+- Do NOT include markdown.
+- Do NOT add commentary before or after the JSON array.
+
+FORMAT GUARANTEE (VERY IMPORTANT):
+- You MUST return exactly one output object for each input filing.
+- The output array length MUST equal the number of input filings.
+- Copy each input id exactly as provided.
+- If evidence is weak/ambiguous, still output that filing with a conservative score (usually 0.0) and lower confidence.
+- Never omit a filing.
+- Never return an empty response.
+- If some fields are uncertain, use safe defaults instead of skipping:
+  - sentiment_score: 0.0
+  - confidence: "40%"
+  - summary: "The filing appears limited or ambiguous; a neutral-to-mild interpretation is more appropriate based on available details."
+  - reasons.positives: []
+  - reasons.negatives: []
+  - reasons.guidance_tone: "ambiguous or limited directional signal"
+  - reasons.qa_tone: "insufficient detail or potentially administrative/mechanical"
+- Before finalizing, perform an internal checklist:
+  1) valid JSON array;
+  2) length matches input;
+  3) ids match input order exactly;
+  4) all required keys present in every object.
+
+-------------------------------------
+6. SCORING CALIBRATION NOTES
+-------------------------------------
+Use these calibration principles:
+
+- Open-market purchase by CEO/CFO/founder with meaningful size:
+  usually +0.4 to +0.9 depending on clarity and magnitude
+
+- Open-market sale by CEO/CFO/founder with meaningful size:
+  usually -0.4 to -0.9 depending on clarity and magnitude
+
+- Sale by executive with large remaining holdings and ambiguous motive:
+  usually -0.1 to -0.4
+
+- Tax withholding, vesting-related activity, conversion, or administrative transaction:
+  usually 0.0, or only slightly positive/negative if some directional implication still exists
+
+- If the filing is mostly technical or operational with weak informational value:
+  prefer 0.0 over an exaggerated directional score
+
+- Confidence should be lower when:
+  - transaction code meaning is unclear from the structured fields
+  - the structured record is incomplete
+  - the reason for the trade is ambiguous
+  - remaining holdings or economic magnitude cannot be assessed
+
+-------------------------------------
+7. SUMMARY WRITING STYLE
+-------------------------------------
+The summary should:
+- be 2–3 sentences
+- state whether the filing suggests positive, negative, or neutral insider sentiment
+- explain whether the signal appears discretionary or administrative
+- mention the most important drivers of the score
+- avoid speculation beyond the structured filing record

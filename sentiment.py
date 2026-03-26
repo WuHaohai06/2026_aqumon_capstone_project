@@ -1,4 +1,5 @@
 import aiohttp
+import argparse
 import asyncio
 import json
 import re
@@ -27,35 +28,30 @@ DIFY_API_URL = "http://192.168.10.97/v1/workflows/run"
 DIFY_API_KEY = "app-mtVKZmpWyEOabRYkOR4WihPu"
 
 # 根目录与数据表单目录配置
-ROOT_DIR = "D:\\AQUMON"
+REPO_ROOT = Path(__file__).resolve().parent
 DATA_FORM = "4"
 
-# 数据目录：root_dir/data
-DATA_DIR = Path(ROOT_DIR) / "data"
+# 数据目录：repo_root/data
+DATA_DIR = REPO_ROOT / "data"
 
-# 输入为 data_forms 级目录：root_dir/data/raw_data/data_form
-DATA_FORM_INPUT_DIR = str(DATA_DIR / "raw_data" / DATA_FORM)
+# 输入为 data_forms 级目录：repo_root/data/raw_data/data_form
+DEFAULT_INPUT_DIR = DATA_DIR / "raw_data" / DATA_FORM
 
-# Prompt 文件目录：root_dir/prompts/data_form.txt
-PROMPTS_DIR = Path(ROOT_DIR) / "prompts"
-PROMPT_FILE_PATH = PROMPTS_DIR / f"4_v2.txt"
-PROMPT_NAME = PROMPT_FILE_PATH.stem
+# Prompt 文件目录：repo_root/prompts/data_form.txt
+PROMPTS_DIR = REPO_ROOT / "prompts"
+DEFAULT_PROMPT_FILE = PROMPTS_DIR / "4_v2.txt"
 
 # 最大并发请求数（建议 5–20）
-MAX_CONCURRENCY = 10
+MAX_CONCURRENCY = 8 #DEFAULT 4 建议 8
 
 # 每个 batch 的最大重试次数
 MAX_RETRIES = 1
 
 # 测试模式：只处理前 N 个待处理文件；None 或 <=0 表示不限制
-TEST_FIRST_N_FILES = 1000
+TEST_FIRST_N_FILES = 50
 
-# 输出目录：root_dir/data/results/data_form/prompt_name/
-RESULTS_BASE_DIR = DATA_DIR / "results" / DATA_FORM / PROMPT_NAME
-SUCCESS_RESULTS_JSONL_PATH = str(RESULTS_BASE_DIR / "sentiment_results.jsonl")
-FAILED_LOG_JSONL_PATH = str(RESULTS_BASE_DIR / "failed_transcripts.jsonl")
-OUTPUT_PARQUET_PATH = str(RESULTS_BASE_DIR / "earnings_sentiment.parquet")
-LOG_FILE_PATH = str(RESULTS_BASE_DIR / "sentiment_pipeline.log")
+# 输出目录：repo_root/data/results/data_form/prompt_name/
+DEFAULT_OUTPUT_ROOT = DATA_DIR / "results" / DATA_FORM
 
 # ==========================
 # 日志初始化（文件 + 控制台）
@@ -64,21 +60,76 @@ LOG_FILE_PATH = str(RESULTS_BASE_DIR / "sentiment_pipeline.log")
 logger = logging.getLogger("sentiment_pipeline")
 logger.setLevel(logging.INFO)
 
-# 确保日志与结果目录存在
-RESULTS_BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-# 防止重复添加 handler
-if not logger.handlers:
-    # 控制台
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run Form 4 sentiment analysis with configurable paths.")
+    parser.add_argument(
+        "--input-dir",
+        type=Path,
+        default=DEFAULT_INPUT_DIR,
+        help="Input directory containing raw txt filings.",
+    )
+    parser.add_argument(
+        "--prompt-file",
+        type=Path,
+        default=DEFAULT_PROMPT_FILE,
+        help="Prompt text file used to build the Dify request.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Exact output directory for jsonl/parquet/log files. If omitted, defaults to data/results/4/<prompt_stem>.",
+    )
+    parser.add_argument(
+        "--first-n-files",
+        type=int,
+        default=TEST_FIRST_N_FILES,
+        help="Only process the first N pending files. Use 0 or a negative value for no limit.",
+    )
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=MAX_CONCURRENCY,
+        help="Maximum concurrent Dify requests.",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=MAX_RETRIES,
+        help="Maximum retries per batch.",
+    )
+    parser.add_argument(
+        "--reprocess-existing",
+        action="store_true",
+        help="Do not skip ids already present in the existing output files.",
+    )
+    return parser
+
+
+def build_runtime_paths(prompt_file_path: Path, output_dir: Optional[Path] = None) -> Dict[str, Path]:
+    results_base_dir = output_dir or (DEFAULT_OUTPUT_ROOT / prompt_file_path.stem)
+    return {
+        "results_base_dir": results_base_dir,
+        "success_jsonl": results_base_dir / "sentiment_results.jsonl",
+        "failed_jsonl": results_base_dir / "failed_transcripts.jsonl",
+        "parquet": results_base_dir / "sentiment_results.parquet",
+        "log_file": results_base_dir / "sentiment_pipeline.log",
+    }
+
+
+def setup_logger(log_file_path: Path) -> None:
+    logger.handlers.clear()
+    log_file_path.parent.mkdir(parents=True, exist_ok=True)
+
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
-    # 文件
-    fh = logging.FileHandler(LOG_FILE_PATH, encoding="utf-8")
+    fh = logging.FileHandler(log_file_path, encoding="utf-8")
     fh.setLevel(logging.INFO)
 
     formatter = logging.Formatter(
         fmt="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
     ch.setFormatter(formatter)
     fh.setFormatter(formatter)
@@ -255,6 +306,32 @@ def load_processed_ids_from_jsonl(path: str) -> Set[str]:
                 continue
 
     logger.info(f"Loaded {len(processed_ids)} already-processed ids from {path}")
+    return processed_ids
+
+
+def load_processed_ids_from_parquet(path: str) -> Set[str]:
+    processed_ids: Set[str] = set()
+    fp = Path(path)
+    if not fp.exists():
+        return processed_ids
+
+    try:
+        df = pd.read_parquet(fp, columns=["id"])
+    except Exception as exc:
+        logger.warning("Failed to read existing parquet ids from %s: %s", path, exc)
+        return processed_ids
+
+    if "id" not in df.columns:
+        return processed_ids
+
+    processed_ids = {str(value) for value in df["id"].dropna().tolist()}
+    logger.info("Loaded %s already-processed ids from %s", len(processed_ids), path)
+    return processed_ids
+
+
+def load_processed_ids(success_jsonl_path: str, parquet_path: str) -> Set[str]:
+    processed_ids = load_processed_ids_from_jsonl(success_jsonl_path)
+    processed_ids.update(load_processed_ids_from_parquet(parquet_path))
     return processed_ids
 
 
@@ -586,6 +663,7 @@ async def analyze_transcripts_concurrently(
     transcripts: Iterable[Dict[str, Any]],
     prompt_template: str,
     total_to_process: int,
+    success_jsonl_path: str,
     max_concurrency: int = MAX_CONCURRENCY
 ) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
     """
@@ -651,7 +729,7 @@ async def analyze_transcripts_concurrently(
                         pbar.set_postfix(success=success_count, failed=failed_count)
                     continue
 
-                append_success_results_to_jsonl(batch_result, SUCCESS_RESULTS_JSONL_PATH)
+                append_success_results_to_jsonl(batch_result, success_jsonl_path)
 
                 success_count += len(batch_result)
                 failed_count += max(0, batch_size - len(batch_result))
@@ -707,48 +785,72 @@ def convert_success_jsonl_to_parquet(
     读取所有成功结果 JSONL，展平为表结构，写入 Parquet。
     可重复执行，每次都会完全根据 JSONL 重建 Parquet。
     """
-    fp = Path(success_jsonl_path)
-    if not fp.exists():
-        print(f"[INFO] No success JSONL found at {success_jsonl_path}, skip Parquet conversion.")
-        return
+    def build_row(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        tid = obj.get("id")
+        if not tid:
+            return None
 
-    rows = []
-    with fp.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        reasons = obj.get("reasons", {}) or {}
+        positives = reasons.get("positives", [])
+        negatives = reasons.get("negatives", [])
+        guidance_tone = reasons.get("guidance_tone", "")
+        qa_tone = reasons.get("qa_tone", "")
 
-            tid = obj.get("id")
-            reasons = obj.get("reasons", {}) or {}
-            positives = reasons.get("positives", [])
-            negatives = reasons.get("negatives", [])
-            guidance_tone = reasons.get("guidance_tone", "")
-            qa_tone = reasons.get("qa_tone", "")
+        return {
+            "id": str(tid),
+            "sentiment_score": obj.get("sentiment_score"),
+            "confidence": obj.get("confidence"),
+            "summary": obj.get("summary"),
+            "reasons_positives": json.dumps(positives, ensure_ascii=False),
+            "reasons_negatives": json.dumps(negatives, ensure_ascii=False),
+            "reasons_guidance_tone": guidance_tone,
+            "reasons_qa_tone": qa_tone,
+        }
 
-            row = {
-                "id": tid,
-                "sentiment_score": obj.get("sentiment_score"),
-                "confidence": obj.get("confidence"),
-                "summary": obj.get("summary"),
-                "reasons_positives": json.dumps(positives, ensure_ascii=False),
-                "reasons_negatives": json.dumps(negatives, ensure_ascii=False),
-                "reasons_guidance_tone": guidance_tone,
-                "reasons_qa_tone": qa_tone,
-            }
-            rows.append(row)
+    rows: List[Dict[str, Any]] = []
+    parquet_fp = Path(parquet_path)
+    jsonl_fp = Path(success_jsonl_path)
+
+    if parquet_fp.exists():
+        try:
+            existing_df = pd.read_parquet(parquet_fp)
+            if not existing_df.empty and "id" in existing_df.columns:
+                rows.extend(existing_df.to_dict(orient="records"))
+        except Exception as exc:
+            logger.warning("Failed to read existing parquet %s: %s", parquet_path, exc)
+
+    if jsonl_fp.exists():
+        with jsonl_fp.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                row = build_row(obj)
+                if row is not None:
+                    rows.append(row)
 
     if not rows:
-        print("[INFO] No valid rows parsed from success JSONL, skip Parquet.")
+        print(f"[INFO] No valid rows found in {success_jsonl_path} or {parquet_path}, skip Parquet.")
         return
 
     df = pd.DataFrame(rows)
-    df.to_parquet(parquet_path, index=False)
-    print(f"[INFO] Converted {len(rows)} rows from JSONL to Parquet: {parquet_path}")
+    if "id" not in df.columns:
+        print("[INFO] No id column found after merge, skip Parquet.")
+        return
+
+    df["id"] = df["id"].astype(str)
+    merged_count = len(df)
+    df = df.drop_duplicates(subset=["id"], keep="last").reset_index(drop=True)
+    parquet_fp.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(parquet_fp, index=False)
+    print(
+        f"[INFO] Merged {merged_count} rows into {len(df)} unique ids and wrote Parquet: {parquet_path}"
+    )
 
 
 # ==========================
@@ -756,29 +858,51 @@ def convert_success_jsonl_to_parquet(
 # ==========================
 
 if __name__ == "__main__":
-    prompt_template = load_prompt_template(PROMPT_FILE_PATH)
+    args = build_parser().parse_args()
+    prompt_file_path = args.prompt_file
+    input_dir = str(args.input_dir)
+    first_n_files = args.first_n_files
+    if first_n_files is not None and first_n_files <= 0:
+        first_n_files = None
+
+    MAX_RETRIES = int(args.max_retries)
+    runtime_paths = build_runtime_paths(prompt_file_path, args.output_dir)
+    setup_logger(runtime_paths["log_file"])
+    prompt_template = load_prompt_template(prompt_file_path)
+
+    logger.info("Using input dir: %s", input_dir)
+    logger.info("Using prompt file: %s", prompt_file_path)
+    logger.info("Using output dir: %s", runtime_paths["results_base_dir"])
 
     # 1）先看之前已经成功的有哪些，跳过
-    processed_ids = load_processed_ids_from_jsonl(SUCCESS_RESULTS_JSONL_PATH)
+    processed_ids: Set[str] = set()
+    if not args.reprocess_existing:
+        processed_ids = load_processed_ids(
+            str(runtime_paths["success_jsonl"]),
+            str(runtime_paths["parquet"]),
+        )
 
     # 2）先统计本轮要处理的数量（不读文件正文）
     pending_total = count_pending_transcripts(
-        DATA_FORM_INPUT_DIR,
+        input_dir,
         processed_ids,
-        first_n_files=TEST_FIRST_N_FILES,
+        first_n_files=first_n_files,
     )
 
     if pending_total <= 0:
         print("[INFO] No new transcripts to process. You can still regenerate Parquet from existing JSONL.")
         # 直接从已有 JSONL 生成一次 Parquet
-        convert_success_jsonl_to_parquet(SUCCESS_RESULTS_JSONL_PATH, OUTPUT_PARQUET_PATH)
+        convert_success_jsonl_to_parquet(
+            str(runtime_paths["success_jsonl"]),
+            str(runtime_paths["parquet"]),
+        )
         sys.exit(0)
 
     # 3）流式加载 transcripts（边读边处理）
     transcripts_iter = iter_transcripts_from_data_form_dir(
-        DATA_FORM_INPUT_DIR,
+        input_dir,
         processed_ids,
-        first_n_files=TEST_FIRST_N_FILES,
+        first_n_files=first_n_files,
     )
 
     # 4）并发分析 + 增量写 JSONL
@@ -787,6 +911,8 @@ if __name__ == "__main__":
             transcripts_iter,
             prompt_template,
             total_to_process=pending_total,
+            success_jsonl_path=str(runtime_paths["success_jsonl"]),
+            max_concurrency=int(args.max_concurrency),
         )
     )
 
@@ -799,7 +925,10 @@ if __name__ == "__main__":
         print(f"[SUMMARY] Failed transcript ids (this run): {failed_ids}")
 
     # 5）追加写失败批次日志
-    append_failed_records_to_jsonl(failed_records, FAILED_LOG_JSONL_PATH)
+    append_failed_records_to_jsonl(failed_records, str(runtime_paths["failed_jsonl"]))
 
     # 6）基于完整的 success JSONL 重新生成一次 Parquet
-    convert_success_jsonl_to_parquet(SUCCESS_RESULTS_JSONL_PATH, OUTPUT_PARQUET_PATH)
+    convert_success_jsonl_to_parquet(
+        str(runtime_paths["success_jsonl"]),
+        str(runtime_paths["parquet"]),
+    )
