@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
@@ -27,22 +28,80 @@ PROMPTS_DIR = REPO_ROOT / "prompts"
 DEFAULT_PROMPT_FILE = PROMPTS_DIR / "4_extraction_v1.txt"
 DEFAULT_OUTPUT_ROOT = DATA_DIR / "results" / DATA_FORM
 
-DIFY_API_URL = "http://192.168.10.97/v1/workflows/run"
-DIFY_API_KEY = "app-mtVKZmpWyEOabRYkOR4WihPu"
+HK_DIFY_API_URL = "http://192.168.10.97/v1/workflows/run"
+SZ_DIFY_API_URL = "http://192.168.32.50/v1/workflows/run"
+
+GEMINI_DIFY_API_KEY = "app-mtVKZmpWyEOabRYkOR4WihPu"
+GEMINI_BATCH_DIFY_API_KEY = "app-4sV7yFdvPuhiE0XSg4G4usAg"
+GPT_DIFY_API_KEY = "app-SMU26wd8bd1VmfJTyhP2moe4"
 
 MAX_CONCURRENCY = 8
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_FIRST_N_FILES: Optional[int] = None
 
+DIFY_URL_ALIASES: Dict[str, str] = {
+    "hk_api": HK_DIFY_API_URL,
+    "sz_api": SZ_DIFY_API_URL,
+}
+
+DIFY_PROFILES: Dict[str, Dict[str, str]] = {
+    "gemini": {
+        "api_key": GEMINI_DIFY_API_KEY,
+        "model_name": "gemini",
+    },
+    "gemi_batch": {
+        "api_key": GEMINI_BATCH_DIFY_API_KEY,
+        "model_name": "gemi_batch",
+    },
+    "gpt": {
+        "api_key": GPT_DIFY_API_KEY,
+        "model_name": "gpt",
+    },
+}
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    dify_profile: str
+    dify_url_alias: str
+    dify_api_url: str
+    dify_api_key: str
+    model_name: str
+
+
+def sanitize_name(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_")
+    return sanitized or "model"
+
 
 def build_parser() -> argparse.ArgumentParser:
+    profile_help = ", ".join(
+        f"{name} -> {cfg['model_name']}" for name, cfg in sorted(DIFY_PROFILES.items())
+    )
+    url_help = ", ".join(
+        f"{name} -> {url}" for name, url in sorted(DIFY_URL_ALIASES.items())
+    )
     parser = argparse.ArgumentParser(
         description="Parse Form 4 txt filings into structured JSON files using the same Dify interface as sentiment.py."
     )
+    parser.add_argument(
+        "--dify-api",
+        "--dify-profile",
+        dest="dify_profile",
+        choices=sorted(DIFY_PROFILES.keys()),
+        default="gemini",
+        help=f"Select which Dify app/profile to use. {profile_help}",
+    )
+    parser.add_argument(
+        "--dify-url",
+        choices=sorted(DIFY_URL_ALIASES.keys()),
+        default="hk_api",
+        help=f"Select which Dify workflow endpoint to use. {url_help}",
+    )
     parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR, help="Input directory containing Form 4 txt files.")
     parser.add_argument("--prompt-file", type=Path, default=DEFAULT_PROMPT_FILE, help="Prompt text file containing the extraction instructions.")
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help="Root results directory; prompt name will be appended automatically.")
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help="Root results directory; prompt name and model name will be appended automatically.")
     parser.add_argument("--first-n-files", type=int, default=DEFAULT_FIRST_N_FILES, help="Only process the first N pending files.")
     parser.add_argument("--max-concurrency", type=int, default=MAX_CONCURRENCY, help="Maximum concurrent Dify requests.")
     parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES, help="Maximum retries per filing.")
@@ -50,9 +109,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_runtime_paths(output_root: Path, prompt_file: Path) -> Dict[str, Path]:
+def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
+    dify_profile_cfg = DIFY_PROFILES[args.dify_profile]
+    return RuntimeConfig(
+        dify_profile=args.dify_profile,
+        dify_url_alias=args.dify_url,
+        dify_api_url=DIFY_URL_ALIASES[args.dify_url],
+        dify_api_key=dify_profile_cfg["api_key"],
+        model_name=sanitize_name(dify_profile_cfg["model_name"]),
+    )
+
+
+def build_runtime_paths(output_root: Path, prompt_file: Path, model_name: str) -> Dict[str, Path]:
     prompt_name = prompt_file.stem
-    run_dir = output_root / prompt_name
+    run_dir = output_root / f"{prompt_name}_{model_name}"
     return {
         "run_dir": run_dir,
         "structured_json_root": run_dir / "structured_json",
@@ -282,6 +352,7 @@ async def call_dify_for_filing(
     raw_response_root: Path,
     timeout_seconds: int,
     max_retries: int,
+    runtime_config: RuntimeConfig,
     logger: logging.Logger,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     full_prompt = prompt_template.replace("__FORM4_TEXT__", filing["text"])
@@ -290,10 +361,10 @@ async def call_dify_for_filing(
             "input": full_prompt,
         },
         "response_mode": "blocking",
-        "user": "form4-structured-extraction",
+        "user": f"form4-structured-extraction-{runtime_config.model_name}",
     }
     headers = {
-        "Authorization": f"Bearer {DIFY_API_KEY}",
+        "Authorization": f"Bearer {runtime_config.dify_api_key}",
         "Content-Type": "application/json",
     }
 
@@ -303,7 +374,7 @@ async def call_dify_for_filing(
         try:
             async with sem:
                 async with session.post(
-                    DIFY_API_URL,
+                    runtime_config.dify_api_url,
                     headers=headers,
                     json=payload,
                     timeout=timeout_seconds,
@@ -418,6 +489,7 @@ async def extract_form4_files_concurrently(
     max_concurrency: int,
     timeout_seconds: int,
     max_retries: int,
+    runtime_config: RuntimeConfig,
     logger: logging.Logger,
 ) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
     sem = asyncio.Semaphore(max_concurrency)
@@ -506,6 +578,7 @@ async def extract_form4_files_concurrently(
                     raw_response_root=raw_response_root,
                     timeout_seconds=timeout_seconds,
                     max_retries=max_retries,
+                    runtime_config=runtime_config,
                     logger=logger,
                 )
             )
@@ -534,6 +607,7 @@ async def extract_form4_files_concurrently(
 
 def main() -> int:
     args = build_parser().parse_args()
+    runtime_config = build_runtime_config(args)
     input_dir: Path = args.input_dir
     prompt_file: Path = args.prompt_file
     output_root: Path = args.output_root
@@ -542,7 +616,7 @@ def main() -> int:
     max_retries: int = int(args.max_retries)
     timeout_seconds: int = int(args.timeout_seconds)
 
-    runtime_paths = build_runtime_paths(output_root, prompt_file)
+    runtime_paths = build_runtime_paths(output_root, prompt_file, runtime_config.model_name)
     logger = setup_logger(runtime_paths["log_file"])
 
     try:
@@ -558,6 +632,10 @@ def main() -> int:
         first_n_files=first_n_files,
     )
 
+    logger.info("Using Dify profile: %s", runtime_config.dify_profile)
+    logger.info("Using Dify URL alias: %s", runtime_config.dify_url_alias)
+    logger.info("Resolved Dify URL: %s", runtime_config.dify_api_url)
+    logger.info("Resolved model name: %s", runtime_config.model_name)
     logger.info("Using prompt file: %s", prompt_file)
     logger.info("Output run directory: %s", runtime_paths["run_dir"])
     logger.info("Raw response root: %s", runtime_paths["raw_response_root"])
@@ -584,12 +662,17 @@ def main() -> int:
             max_concurrency=max_concurrency,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
+            runtime_config=runtime_config,
             logger=logger,
         )
     )
 
     failed_ids = [record["id"] for record in failed_records]
 
+    print(f"[SUMMARY] Dify profile: {runtime_config.dify_profile}")
+    print(f"[SUMMARY] Dify URL   : {runtime_config.dify_url_alias} -> {runtime_config.dify_api_url}")
+    print(f"[SUMMARY] Model name : {runtime_config.model_name}")
+    print(f"[SUMMARY] Output dir : {runtime_paths['run_dir']}")
     print(f"[SUMMARY] Newly processed files: {stats['processed']}")
     print(f"[SUMMARY] Success count: {stats['success']}")
     print(f"[SUMMARY] Failed count: {stats['failed']}")

@@ -1,13 +1,16 @@
+import argparse
 import aiohttp
 import asyncio
 import json
-import re
-from typing import List, Dict, Any, Optional, Tuple, Set, Iterable, Iterator
-from datetime import datetime
-import pandas as pd
-from pathlib import Path
-import sys
 import logging
+import re
+import sys
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple
+
+import pandas as pd
 
 try:
     from tqdm import tqdm
@@ -15,39 +18,170 @@ except ImportError:
     tqdm = None
 
 
-DIFY_API_URL = "http://192.168.10.97/v1/workflows/run"
-DIFY_API_KEY = "app-mtVKZmpWyEOabRYkOR4WihPu"
-
-ROOT_DIR = "D:\\AQUMON"
+REPO_ROOT = Path(__file__).resolve().parent
 DATA_FORM = "4"
+DATA_DIR = REPO_ROOT / "data"
+PROMPTS_DIR = REPO_ROOT / "prompts"
 
-DATA_DIR = Path(ROOT_DIR) / "data"
-STRUCTURED_INPUT_DIR = DATA_DIR / "results" / DATA_FORM / "4_extraction_v1" / "structured_json"
+HK_DIFY_API_URL = "http://192.168.10.97/v1/workflows/run"
+SZ_DIFY_API_URL = "http://192.168.32.50/v1/workflows/run"
+GEMINI_DIFY_API_KEY = "app-mtVKZmpWyEOabRYkOR4WihPu"
+GEMINI_BATCH_DIFY_API_KEY = "app-4sV7yFdvPuhiE0XSg4G4usAg"
+GPT_DIFY_API_KEY = "app-SMU26wd8bd1VmfJTyhP2moe4"
 
-PROMPTS_DIR = Path(ROOT_DIR) / "prompts"
-PROMPT_FILE_PATH = PROMPTS_DIR / "4_structured_input.txt"
-PROMPT_NAME = PROMPT_FILE_PATH.stem
+DEFAULT_INPUT_DIR = DATA_DIR / "results" / DATA_FORM / "4_extraction_v1" / "structured_json"
+DEFAULT_PROMPT_FILE = PROMPTS_DIR / "4_golden_structured_input.txt"
+DEFAULT_MAX_CONCURRENCY = 4
+DEFAULT_MAX_RETRIES = 1
+DEFAULT_BATCH_SIZE = 3
+DEFAULT_TIMEOUT_SECONDS = 120
 
-MAX_CONCURRENCY = 8
-MAX_RETRIES = 1
-TEST_FIRST_N_FILES = None
+DIFY_URL_ALIASES: Dict[str, str] = {
+    "hk_api": HK_DIFY_API_URL,
+    "sz_api": SZ_DIFY_API_URL,
+}
 
-RESULTS_BASE_DIR = DATA_DIR / "results" / DATA_FORM / PROMPT_NAME
-SUCCESS_RESULTS_JSONL_PATH = str(RESULTS_BASE_DIR / "sentiment_results.jsonl")
-FAILED_LOG_JSONL_PATH = str(RESULTS_BASE_DIR / "failed_transcripts.jsonl")
-OUTPUT_PARQUET_PATH = str(RESULTS_BASE_DIR / "sentiment_results.parquet")
-LOG_FILE_PATH = str(RESULTS_BASE_DIR / "sentiment_pipeline.log")
-
+DIFY_PROFILES: Dict[str, Dict[str, str]] = {
+    "gemini": {
+        "api_key": GEMINI_DIFY_API_KEY,
+        "model_name": "gemini",
+    },
+    "gemi_batch": {
+        "api_key": GEMINI_BATCH_DIFY_API_KEY,
+        "model_name": "gemi_batch",
+    },
+    "gpt": {
+        "api_key": GPT_DIFY_API_KEY,
+        "model_name": "gpt",
+    },
+}
 
 logger = logging.getLogger("sentiment_structured_pipeline")
-logger.setLevel(logging.INFO)
 
-RESULTS_BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-if not logger.handlers:
+@dataclass(frozen=True)
+class RuntimeConfig:
+    dify_profile: str
+    dify_url_alias: str
+    dify_api_url: str
+    dify_api_key: str
+    model_name: str
+    input_dir: Path
+    prompt_file: Path
+    prompt_name: str
+    result_dir_name: str
+    results_base_dir: Path
+    success_jsonl_path: Path
+    failed_log_path: Path
+    output_parquet_path: Path
+    log_file_path: Path
+    max_concurrency: int
+    batch_size: int
+    max_retries: int
+    first_n_files: Optional[int]
+    reprocess_existing: bool
+
+
+def parse_args() -> argparse.Namespace:
+    profile_help = ", ".join(
+        f"{name} -> {cfg['model_name']}" for name, cfg in sorted(DIFY_PROFILES.items())
+    )
+    url_help = ", ".join(
+        f"{name} -> {url}" for name, url in sorted(DIFY_URL_ALIASES.items())
+    )
+
+    parser = argparse.ArgumentParser(
+        description="Run structured Form 4 sentiment analysis from structured JSON inputs.",
+    )
+    parser.add_argument(
+        "--dify-api",
+        "--dify-profile",
+        dest="dify_profile",
+        choices=sorted(DIFY_PROFILES.keys()),
+        default="gemini",
+        help=f"Select which Dify app/profile to use. {profile_help}",
+    )
+    parser.add_argument(
+        "--dify-url",
+        choices=sorted(DIFY_URL_ALIASES.keys()),
+        default="hk_api",
+        help=f"Select which Dify workflow endpoint to use. {url_help}",
+    )
+    parser.add_argument(
+        "--prompt-file",
+        type=Path,
+        default=DEFAULT_PROMPT_FILE,
+        help="Prompt template file. Must contain __FILINGS_JSON__.",
+    )
+    parser.add_argument(
+        "--input-dir",
+        type=Path,
+        default=DEFAULT_INPUT_DIR,
+        help="Directory containing structured JSON filings.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional output directory. Defaults to "
+            "data/results/4/<prompt_name>_<model_name>."
+        ),
+    )
+    parser.add_argument(
+        "--first-n-files",
+        type=int,
+        default=None,
+        help="Only process the first N pending filings.",
+    )
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=DEFAULT_MAX_CONCURRENCY,
+        help=f"Maximum number of concurrent Dify requests. Default: {DEFAULT_MAX_CONCURRENCY}",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help=f"Number of filings sent in each Dify batch. Default: {DEFAULT_BATCH_SIZE}",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=DEFAULT_MAX_RETRIES,
+        help=f"Maximum retry attempts per batch. Default: {DEFAULT_MAX_RETRIES}",
+    )
+    parser.add_argument(
+        "--reprocess-existing",
+        action="store_true",
+        help="Ignore existing success JSONL and reprocess all filings into the selected output folder.",
+    )
+    return parser.parse_args()
+
+
+def sanitize_name(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_")
+    return sanitized or "model"
+
+
+def configure_logger(log_file_path: Path) -> None:
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+
+    log_file_path.parent.mkdir(parents=True, exist_ok=True)
+
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
-    fh = logging.FileHandler(LOG_FILE_PATH, encoding="utf-8")
+
+    fh = logging.FileHandler(log_file_path, encoding="utf-8")
     fh.setLevel(logging.INFO)
 
     formatter = logging.Formatter(
@@ -59,6 +193,44 @@ if not logger.handlers:
 
     logger.addHandler(ch)
     logger.addHandler(fh)
+
+
+def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
+    dify_profile_cfg = DIFY_PROFILES[args.dify_profile]
+    dify_api_url = DIFY_URL_ALIASES[args.dify_url]
+    prompt_file = args.prompt_file.resolve()
+    input_dir = args.input_dir.resolve()
+    prompt_name = prompt_file.stem
+    model_name = sanitize_name(dify_profile_cfg["model_name"])
+    result_dir_name = f"{prompt_name}_{model_name}"
+
+    results_base_dir = (
+        args.output_dir.resolve()
+        if args.output_dir is not None
+        else DATA_DIR / "results" / DATA_FORM / result_dir_name
+    )
+
+    return RuntimeConfig(
+        dify_profile=args.dify_profile,
+        dify_url_alias=args.dify_url,
+        dify_api_url=dify_api_url,
+        dify_api_key=dify_profile_cfg["api_key"],
+        model_name=model_name,
+        input_dir=input_dir,
+        prompt_file=prompt_file,
+        prompt_name=prompt_name,
+        result_dir_name=result_dir_name,
+        results_base_dir=results_base_dir,
+        success_jsonl_path=results_base_dir / "sentiment_results.jsonl",
+        failed_log_path=results_base_dir / "failed_transcripts.jsonl",
+        output_parquet_path=results_base_dir / "sentiment_results.parquet",
+        log_file_path=results_base_dir / "sentiment_pipeline.log",
+        max_concurrency=args.max_concurrency,
+        batch_size=args.batch_size,
+        max_retries=args.max_retries,
+        first_n_files=args.first_n_files,
+        reprocess_existing=args.reprocess_existing,
+    )
 
 
 def load_prompt_template(prompt_file_path: Path) -> str:
@@ -73,13 +245,12 @@ def load_prompt_template(prompt_file_path: Path) -> str:
     raise FileNotFoundError(f"Prompt file not found: {prompt_file_path}")
 
 
-def load_processed_ids_from_jsonl(path: str) -> Set[str]:
+def load_processed_ids_from_jsonl(path: Path) -> Set[str]:
     processed_ids: Set[str] = set()
-    fp = Path(path)
-    if not fp.exists():
+    if not path.exists():
         return processed_ids
 
-    with fp.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -179,7 +350,7 @@ def iter_structured_filings(
 
 def chunk_transcripts(
     transcripts: Iterable[Dict[str, Any]],
-    batch_size: int = 5,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> Iterator[List[Dict[str, Any]]]:
     batch: List[Dict[str, Any]] = []
     for item in transcripts:
@@ -192,31 +363,27 @@ def chunk_transcripts(
         yield batch
 
 
-def append_success_results_to_jsonl(
-    batch_result: List[Dict[str, Any]],
-    path: str,
-) -> None:
+def append_success_results_to_jsonl(batch_result: List[Dict[str, Any]], path: Path) -> None:
     if not batch_result:
         return
-    with open(path, "a", encoding="utf-8") as f:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
         for item in batch_result:
             if "id" not in item:
                 continue
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
-def append_failed_records_to_jsonl(
-    failed_records: List[Dict[str, Any]],
-    path: str,
-) -> None:
+def append_failed_records_to_jsonl(failed_records: List[Dict[str, Any]], path: Path) -> None:
     if not failed_records:
         return
-    with open(path, "a", encoding="utf-8") as f:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
         for rec in failed_records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
-def load_json_with_auto_escape(s: str, max_fixes: int = 50):
+def load_json_with_auto_escape(s: str, max_fixes: int = 50) -> Any:
     text = s
     for _ in range(max_fixes):
         try:
@@ -279,35 +446,33 @@ async def call_dify_batch(
     batch: List[Dict[str, Any]],
     failed_records: List[Dict[str, Any]],
     prompt_template: str,
+    config: RuntimeConfig,
 ) -> Optional[List[Dict[str, Any]]]:
-    filings_payload = [
-        {"id": item["id"], "filing": item["filing"]}
-        for item in batch
-    ]
+    filings_payload = [{"id": item["id"], "filing": item["filing"]} for item in batch]
     filings_json_str = json.dumps(filings_payload, ensure_ascii=False)
     full_prompt = prompt_template.replace("__FILINGS_JSON__", filings_json_str)
 
     payload = {
         "inputs": {"input": full_prompt},
         "response_mode": "blocking",
-        "user": "form4-structured-sentiment-batch",
+        "user": f"form4-structured-sentiment-batch-{config.model_name}",
     }
 
     headers = {
-        "Authorization": f"Bearer {DIFY_API_KEY}",
+        "Authorization": f"Bearer {config.dify_api_key}",
         "Content-Type": "application/json",
     }
 
     last_error_reason = None
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, config.max_retries + 1):
         try:
             async with sem:
                 async with session.post(
-                    DIFY_API_URL,
+                    config.dify_api_url,
                     headers=headers,
                     json=payload,
-                    timeout=120,
+                    timeout=DEFAULT_TIMEOUT_SECONDS,
                 ) as resp:
                     status = resp.status
                     text = await resp.text()
@@ -320,7 +485,7 @@ async def call_dify_batch(
             else:
                 try:
                     data = json.loads(text)["data"]
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, KeyError):
                     last_error_reason = "Response is not valid JSON"
                     logger.error("Response is not valid JSON on attempt %s", attempt)
                     await asyncio.sleep(2 * attempt)
@@ -366,12 +531,12 @@ async def call_dify_batch(
         await asyncio.sleep(2 * attempt)
 
     batch_ids = [item["id"] for item in batch]
-    logger.error("Batch with ids %s failed after %s attempts.", batch_ids, MAX_RETRIES)
+    logger.error("Batch with ids %s failed after %s attempts.", batch_ids, config.max_retries)
     failed_records.append(
         {
             "batch_ids": batch_ids,
             "reason": last_error_reason or "Unknown error",
-            "attempts": MAX_RETRIES,
+            "attempts": config.max_retries,
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
     )
@@ -382,10 +547,10 @@ async def analyze_transcripts_concurrently(
     transcripts: Iterable[Dict[str, Any]],
     prompt_template: str,
     total_to_process: int,
-    max_concurrency: int = MAX_CONCURRENCY,
+    config: RuntimeConfig,
 ) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
     failed_records_all: List[Dict[str, Any]] = []
-    sem = asyncio.Semaphore(max_concurrency)
+    sem = asyncio.Semaphore(config.max_concurrency)
 
     processed_count = 0
     success_count = 0
@@ -422,7 +587,7 @@ async def analyze_transcripts_concurrently(
                         {
                             "batch_ids": batch_ids,
                             "reason": f"Unhandled task exception: {e}",
-                            "attempts": MAX_RETRIES,
+                            "attempts": config.max_retries,
                             "timestamp": datetime.utcnow().isoformat() + "Z",
                         }
                     )
@@ -448,16 +613,16 @@ async def analyze_transcripts_concurrently(
                         pbar.set_postfix(success=success_count, failed=failed_count)
                     continue
 
-                append_success_results_to_jsonl(batch_result, SUCCESS_RESULTS_JSONL_PATH)
+                append_success_results_to_jsonl(batch_result, config.success_jsonl_path)
                 success_count += len(batch_result)
                 failed_count += max(0, batch_size - len(batch_result))
 
                 if pbar is not None:
                     pbar.set_postfix(success=success_count, failed=failed_count)
 
-        for batch in chunk_transcripts(transcripts, batch_size=5):
+        for batch in chunk_transcripts(transcripts, batch_size=config.batch_size):
             task = asyncio.create_task(
-                call_dify_batch(session, sem, batch, failed_records_all, prompt_template)
+                call_dify_batch(session, sem, batch, failed_records_all, prompt_template, config)
             )
             pending_tasks.add(task)
             task_meta[task] = {
@@ -465,7 +630,7 @@ async def analyze_transcripts_concurrently(
                 "ids": [item["id"] for item in batch],
             }
 
-            if len(pending_tasks) >= max_concurrency:
+            if len(pending_tasks) >= config.max_concurrency:
                 done, pending_tasks = await asyncio.wait(
                     pending_tasks,
                     return_when=asyncio.FIRST_COMPLETED,
@@ -492,17 +657,13 @@ async def analyze_transcripts_concurrently(
     return stats, failed_records_all
 
 
-def convert_success_jsonl_to_parquet(
-    success_jsonl_path: str,
-    parquet_path: str,
-) -> None:
-    fp = Path(success_jsonl_path)
-    if not fp.exists():
+def convert_success_jsonl_to_parquet(success_jsonl_path: Path, parquet_path: Path) -> None:
+    if not success_jsonl_path.exists():
         print(f"[INFO] No success JSONL found at {success_jsonl_path}, skip Parquet conversion.")
         return
 
     rows = []
-    with fp.open("r", encoding="utf-8") as f:
+    with success_jsonl_path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -513,11 +674,20 @@ def convert_success_jsonl_to_parquet(
                 continue
 
             reasons = obj.get("reasons", {}) or {}
+            signal_breakdown = obj.get("signal_breakdown", {}) or {}
             row = {
                 "id": obj.get("id"),
                 "sentiment_score": obj.get("sentiment_score"),
                 "confidence": obj.get("confidence"),
                 "summary": obj.get("summary"),
+                "signal_direction": signal_breakdown.get("direction", ""),
+                "signal_insider_role_strength": signal_breakdown.get("insider_role_strength", ""),
+                "signal_size_assessment": signal_breakdown.get("size_assessment", ""),
+                "signal_discretionary_level": signal_breakdown.get("discretionary_level", ""),
+                "signal_ownership_type": signal_breakdown.get("ownership_type", ""),
+                "signal_information_quality": signal_breakdown.get("information_quality", ""),
+                "decision_factors": json.dumps(obj.get("decision_factors", []), ensure_ascii=False),
+                "risk_flags": json.dumps(obj.get("risk_flags", []), ensure_ascii=False),
                 "reasons_positives": json.dumps(reasons.get("positives", []), ensure_ascii=False),
                 "reasons_negatives": json.dumps(reasons.get("negatives", []), ensure_ascii=False),
                 "reasons_guidance_tone": reasons.get("guidance_tone", ""),
@@ -529,31 +699,52 @@ def convert_success_jsonl_to_parquet(
         print("[INFO] No valid rows parsed from success JSONL, skip Parquet.")
         return
 
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
     df.to_parquet(parquet_path, index=False)
     print(f"[INFO] Converted {len(rows)} rows from JSONL to Parquet: {parquet_path}")
 
 
-if __name__ == "__main__":
-    prompt_template = load_prompt_template(PROMPT_FILE_PATH)
+def main() -> int:
+    args = parse_args()
+    config = build_runtime_config(args)
 
-    processed_ids = load_processed_ids_from_jsonl(SUCCESS_RESULTS_JSONL_PATH)
+    config.results_base_dir.mkdir(parents=True, exist_ok=True)
+    configure_logger(config.log_file_path)
+
+    logger.info("Using Dify profile: %s", config.dify_profile)
+    logger.info("Using Dify URL alias: %s", config.dify_url_alias)
+    logger.info("Resolved Dify URL: %s", config.dify_api_url)
+    logger.info("Resolved model name: %s", config.model_name)
+    logger.info("Result directory: %s", config.results_base_dir)
+    logger.info("Input directory: %s", config.input_dir)
+    logger.info("Prompt file: %s", config.prompt_file)
+    logger.info("Max concurrency: %s", config.max_concurrency)
+    logger.info("Batch size: %s", config.batch_size)
+
+    prompt_template = load_prompt_template(config.prompt_file)
+
+    processed_ids = (
+        set()
+        if config.reprocess_existing
+        else load_processed_ids_from_jsonl(config.success_jsonl_path)
+    )
 
     pending_total = count_pending_structured_filings(
-        STRUCTURED_INPUT_DIR,
+        config.input_dir,
         processed_ids,
-        first_n_files=TEST_FIRST_N_FILES,
+        first_n_files=config.first_n_files,
     )
 
     if pending_total <= 0:
         print("[INFO] No new structured filings to process. You can still regenerate Parquet from existing JSONL.")
-        convert_success_jsonl_to_parquet(SUCCESS_RESULTS_JSONL_PATH, OUTPUT_PARQUET_PATH)
-        sys.exit(0)
+        convert_success_jsonl_to_parquet(config.success_jsonl_path, config.output_parquet_path)
+        return 0
 
     transcripts_iter = iter_structured_filings(
-        STRUCTURED_INPUT_DIR,
+        config.input_dir,
         processed_ids,
-        first_n_files=TEST_FIRST_N_FILES,
+        first_n_files=config.first_n_files,
     )
 
     stats, failed_records = asyncio.run(
@@ -561,16 +752,28 @@ if __name__ == "__main__":
             transcripts_iter,
             prompt_template,
             total_to_process=pending_total,
+            config=config,
         )
     )
 
     failed_ids = [filing_id for rec in failed_records for filing_id in rec.get("batch_ids", [])]
 
+    print(f"[SUMMARY] Dify profile: {config.dify_profile}")
+    print(f"[SUMMARY] Dify URL   : {config.dify_url_alias} -> {config.dify_api_url}")
+    print(f"[SUMMARY] Model name : {config.model_name}")
+    print(f"[SUMMARY] Output dir : {config.results_base_dir}")
+    print(f"[SUMMARY] Max concurrency: {config.max_concurrency}")
+    print(f"[SUMMARY] Batch size: {config.batch_size}")
     print(f"[SUMMARY] Newly processed transcripts: {stats['processed']}")
     print(f"[SUMMARY] Success count (this run): {stats['success']}")
     print(f"[SUMMARY] Failed count  (this run): {stats['failed']}")
     if failed_ids:
         print(f"[SUMMARY] Failed transcript ids (this run): {failed_ids}")
 
-    append_failed_records_to_jsonl(failed_records, FAILED_LOG_JSONL_PATH)
-    convert_success_jsonl_to_parquet(SUCCESS_RESULTS_JSONL_PATH, OUTPUT_PARQUET_PATH)
+    append_failed_records_to_jsonl(failed_records, config.failed_log_path)
+    convert_success_jsonl_to_parquet(config.success_jsonl_path, config.output_parquet_path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

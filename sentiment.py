@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import json
 import re
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple, Set, Iterable, Iterator
 from datetime import datetime
 import pandas as pd
@@ -20,12 +21,14 @@ except ImportError:
 # 0. 基本配置（需要你修改的）
 # ==========================
 
-# 替换为你自己的 Dify 应用接口地址
-DIFY_API_URL = "http://192.168.10.97/v1/workflows/run"
+# Dify workflow endpoint aliases
+HK_DIFY_API_URL = "http://192.168.10.97/v1/workflows/run"
+SZ_DIFY_API_URL = "http://192.168.32.50/v1/workflows/run"
 
-# 替换为你自己的 Dify API Key
-# gemini2.5 flash for capstone
-DIFY_API_KEY = "app-mtVKZmpWyEOabRYkOR4WihPu"
+# Dify API keys / model profiles
+GEMINI_DIFY_API_KEY = "app-mtVKZmpWyEOabRYkOR4WihPu"
+GEMINI_BATCH_DIFY_API_KEY = "app-4sV7yFdvPuhiE0XSg4G4usAg"
+GPT_DIFY_API_KEY = "app-SMU26wd8bd1VmfJTyhP2moe4"
 
 # 根目录与数据表单目录配置
 REPO_ROOT = Path(__file__).resolve().parent
@@ -53,6 +56,26 @@ TEST_FIRST_N_FILES = 50
 # 输出目录：repo_root/data/results/data_form/prompt_name/
 DEFAULT_OUTPUT_ROOT = DATA_DIR / "results" / DATA_FORM
 
+DIFY_URL_ALIASES: Dict[str, str] = {
+    "hk_api": HK_DIFY_API_URL,
+    "sz_api": SZ_DIFY_API_URL,
+}
+
+DIFY_PROFILES: Dict[str, Dict[str, str]] = {
+    "gemini": {
+        "api_key": GEMINI_DIFY_API_KEY,
+        "model_name": "gemini",
+    },
+    "gemi_batch": {
+        "api_key": GEMINI_BATCH_DIFY_API_KEY,
+        "model_name": "gemi_batch",
+    },
+    "gpt": {
+        "api_key": GPT_DIFY_API_KEY,
+        "model_name": "gpt",
+    },
+}
+
 # ==========================
 # 日志初始化（文件 + 控制台）
 # ==========================
@@ -61,8 +84,43 @@ logger = logging.getLogger("sentiment_pipeline")
 logger.setLevel(logging.INFO)
 
 
+@dataclass(frozen=True)
+class RuntimeConfig:
+    dify_profile: str
+    dify_url_alias: str
+    dify_api_url: str
+    dify_api_key: str
+    model_name: str
+    max_retries: int
+
+
+def sanitize_name(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_")
+    return sanitized or "model"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Form 4 sentiment analysis with configurable paths.")
+    profile_help = ", ".join(
+        f"{name} -> {cfg['model_name']}" for name, cfg in sorted(DIFY_PROFILES.items())
+    )
+    url_help = ", ".join(
+        f"{name} -> {url}" for name, url in sorted(DIFY_URL_ALIASES.items())
+    )
+    parser.add_argument(
+        "--dify-api",
+        "--dify-profile",
+        dest="dify_profile",
+        choices=sorted(DIFY_PROFILES.keys()),
+        default="gemini",
+        help=f"Select which Dify app/profile to use. {profile_help}",
+    )
+    parser.add_argument(
+        "--dify-url",
+        choices=sorted(DIFY_URL_ALIASES.keys()),
+        default="hk_api",
+        help=f"Select which Dify workflow endpoint to use. {url_help}",
+    )
     parser.add_argument(
         "--input-dir",
         type=Path,
@@ -79,7 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         type=Path,
         default=None,
-        help="Exact output directory for jsonl/parquet/log files. If omitted, defaults to data/results/4/<prompt_stem>.",
+        help="Exact output directory for jsonl/parquet/log files. If omitted, defaults to data/results/4/<prompt_stem>_<model_name>.",
     )
     parser.add_argument(
         "--first-n-files",
@@ -107,8 +165,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_runtime_paths(prompt_file_path: Path, output_dir: Optional[Path] = None) -> Dict[str, Path]:
-    results_base_dir = output_dir or (DEFAULT_OUTPUT_ROOT / prompt_file_path.stem)
+def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
+    dify_profile_cfg = DIFY_PROFILES[args.dify_profile]
+    return RuntimeConfig(
+        dify_profile=args.dify_profile,
+        dify_url_alias=args.dify_url,
+        dify_api_url=DIFY_URL_ALIASES[args.dify_url],
+        dify_api_key=dify_profile_cfg["api_key"],
+        model_name=sanitize_name(dify_profile_cfg["model_name"]),
+        max_retries=int(args.max_retries),
+    )
+
+
+def build_runtime_paths(
+    prompt_file_path: Path,
+    model_name: str,
+    output_dir: Optional[Path] = None,
+) -> Dict[str, Path]:
+    result_dir_name = f"{prompt_file_path.stem}_{model_name}"
+    results_base_dir = output_dir or (DEFAULT_OUTPUT_ROOT / result_dir_name)
     return {
         "results_base_dir": results_base_dir,
         "success_jsonl": results_base_dir / "sentiment_results.jsonl",
@@ -546,6 +621,7 @@ async def call_dify_batch(
     batch: List[Dict[str, Any]],
     failed_records: List[Dict[str, Any]],
     prompt_template: str,
+    runtime_config: RuntimeConfig,
 ) -> Optional[List[Dict[str, Any]]]:
     transcripts_payload = [
         {"id": t["id"], "text": t["text"]}
@@ -561,21 +637,21 @@ async def call_dify_batch(
             "input": full_prompt
         },
         "response_mode": "blocking",
-        "user": "earnings-sentiment-batch"
+        "user": f"earnings-sentiment-batch-{runtime_config.model_name}"
     }
 
     headers = {
-        "Authorization": f"Bearer {DIFY_API_KEY}",
+        "Authorization": f"Bearer {runtime_config.dify_api_key}",
         "Content-Type": "application/json",
     }
 
     last_error_reason = None
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, runtime_config.max_retries + 1):
         try:
             async with sem:
                 async with session.post(
-                    DIFY_API_URL,
+                    runtime_config.dify_api_url,
                     headers=headers,
                     json=payload,
                     timeout=120
@@ -643,12 +719,12 @@ async def call_dify_batch(
         await asyncio.sleep(2 * attempt)
 
     batch_ids = [t["id"] for t in batch]
-    logger.error(f"Batch with ids {batch_ids} failed after {MAX_RETRIES} attempts.")
+    logger.error(f"Batch with ids {batch_ids} failed after {runtime_config.max_retries} attempts.")
 
     failed_records.append({
         "batch_ids": batch_ids,
         "reason": last_error_reason or "Unknown error",
-        "attempts": MAX_RETRIES,
+        "attempts": runtime_config.max_retries,
         "timestamp": datetime.utcnow().isoformat() + "Z"
     })
 
@@ -664,6 +740,7 @@ async def analyze_transcripts_concurrently(
     prompt_template: str,
     total_to_process: int,
     success_jsonl_path: str,
+    runtime_config: RuntimeConfig,
     max_concurrency: int = MAX_CONCURRENCY
 ) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
     """
@@ -707,7 +784,7 @@ async def analyze_transcripts_concurrently(
                     failed_records_all.append({
                         "batch_ids": batch_ids,
                         "reason": f"Unhandled task exception: {e}",
-                        "attempts": MAX_RETRIES,
+                        "attempts": runtime_config.max_retries,
                         "timestamp": datetime.utcnow().isoformat() + "Z"
                     })
 
@@ -738,7 +815,14 @@ async def analyze_transcripts_concurrently(
 
         for batch in chunk_transcripts(transcripts, batch_size=5):
             task = asyncio.create_task(
-                call_dify_batch(session, sem, batch, failed_records_all, prompt_template)
+                call_dify_batch(
+                    session,
+                    sem,
+                    batch,
+                    failed_records_all,
+                    prompt_template,
+                    runtime_config,
+                )
             )
             pending_tasks.add(task)
             task_meta[task] = {
@@ -859,17 +943,21 @@ def convert_success_jsonl_to_parquet(
 
 if __name__ == "__main__":
     args = build_parser().parse_args()
+    runtime_config = build_runtime_config(args)
     prompt_file_path = args.prompt_file
     input_dir = str(args.input_dir)
     first_n_files = args.first_n_files
     if first_n_files is not None and first_n_files <= 0:
         first_n_files = None
 
-    MAX_RETRIES = int(args.max_retries)
-    runtime_paths = build_runtime_paths(prompt_file_path, args.output_dir)
+    runtime_paths = build_runtime_paths(prompt_file_path, runtime_config.model_name, args.output_dir)
     setup_logger(runtime_paths["log_file"])
     prompt_template = load_prompt_template(prompt_file_path)
 
+    logger.info("Using Dify profile: %s", runtime_config.dify_profile)
+    logger.info("Using Dify URL alias: %s", runtime_config.dify_url_alias)
+    logger.info("Resolved Dify URL: %s", runtime_config.dify_api_url)
+    logger.info("Resolved model name: %s", runtime_config.model_name)
     logger.info("Using input dir: %s", input_dir)
     logger.info("Using prompt file: %s", prompt_file_path)
     logger.info("Using output dir: %s", runtime_paths["results_base_dir"])
@@ -912,12 +1000,17 @@ if __name__ == "__main__":
             prompt_template,
             total_to_process=pending_total,
             success_jsonl_path=str(runtime_paths["success_jsonl"]),
+            runtime_config=runtime_config,
             max_concurrency=int(args.max_concurrency),
         )
     )
 
     failed_ids = [tid for rec in failed_records for tid in rec.get("batch_ids", [])]
 
+    print(f"[SUMMARY] Dify profile: {runtime_config.dify_profile}")
+    print(f"[SUMMARY] Dify URL   : {runtime_config.dify_url_alias} -> {runtime_config.dify_api_url}")
+    print(f"[SUMMARY] Model name : {runtime_config.model_name}")
+    print(f"[SUMMARY] Output dir : {runtime_paths['results_base_dir']}")
     print(f"[SUMMARY] Newly processed transcripts: {stats['processed']}")
     print(f"[SUMMARY] Success count (this run): {stats['success']}")
     print(f"[SUMMARY] Failed count  (this run): {stats['failed']}")
