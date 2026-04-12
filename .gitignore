@@ -1,2 +1,3 @@
-# Ignore data outputs
+# Ignore local data and experiment outputs
 /data/
+/test_batch_size/

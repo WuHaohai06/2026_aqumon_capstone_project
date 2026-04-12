@@ -12,6 +12,12 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
 import pandas as pd
 
+from accession_year_filter import (
+    describe_accession_year_filter,
+    matches_accession_year_filter,
+    normalize_accession_year_range,
+)
+
 try:
     from tqdm import tqdm
 except ImportError:
@@ -71,6 +77,7 @@ class RuntimeConfig:
     prompt_name: str
     result_dir_name: str
     results_base_dir: Path
+    completion_markers_root: Path
     success_jsonl_path: Path
     failed_log_path: Path
     output_parquet_path: Path
@@ -133,6 +140,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Only process the first N pending filings.",
+    )
+    parser.add_argument(
+        "--start-year",
+        type=int,
+        default=None,
+        help="Inclusive accession year filter start in YYYY, e.g. 2015.",
+    )
+    parser.add_argument(
+        "--end-year",
+        type=int,
+        default=None,
+        help="Inclusive accession year filter end in YYYY, e.g. 2020.",
     )
     parser.add_argument(
         "--max-concurrency",
@@ -221,6 +240,7 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         prompt_name=prompt_name,
         result_dir_name=result_dir_name,
         results_base_dir=results_base_dir,
+        completion_markers_root=results_base_dir / "completion_markers",
         success_jsonl_path=results_base_dir / "sentiment_results.jsonl",
         failed_log_path=results_base_dir / "failed_transcripts.jsonl",
         output_parquet_path=results_base_dir / "sentiment_results.parquet",
@@ -245,6 +265,31 @@ def load_prompt_template(prompt_file_path: Path) -> str:
     raise FileNotFoundError(f"Prompt file not found: {prompt_file_path}")
 
 
+def completion_marker_path(markers_root: Path, filing_id: str) -> Path:
+    return markers_root / f"{filing_id}.done"
+
+
+def write_completion_marker(
+    markers_root: Path,
+    filing_id: str,
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Path:
+    marker_path = completion_marker_path(markers_root, filing_id)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"id": filing_id}
+    if metadata:
+        payload.update(metadata)
+    marker_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return marker_path
+
+
+def load_processed_ids_from_markers(markers_root: Path) -> Set[str]:
+    if not markers_root.exists():
+        return set()
+    return {marker.stem for marker in markers_root.glob("*.done")}
+
+
 def load_processed_ids_from_jsonl(path: Path) -> Set[str]:
     processed_ids: Set[str] = set()
     if not path.exists():
@@ -267,9 +312,38 @@ def load_processed_ids_from_jsonl(path: Path) -> Set[str]:
     return processed_ids
 
 
+def ensure_completion_markers_from_existing_results(
+    markers_root: Path,
+    success_jsonl_path: Path,
+) -> Set[str]:
+    marker_ids = load_processed_ids_from_markers(markers_root)
+    legacy_ids = load_processed_ids_from_jsonl(success_jsonl_path)
+    missing_ids = legacy_ids - marker_ids
+
+    for filing_id in sorted(missing_ids):
+        write_completion_marker(
+            markers_root,
+            filing_id,
+            metadata={
+                "created_from": "legacy_success_jsonl",
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            },
+        )
+
+    if missing_ids:
+        logger.info(
+            "Created %s missing completion markers from existing success JSONL.",
+            len(missing_ids),
+        )
+
+    return marker_ids | missing_ids
+
+
 def count_pending_structured_filings(
     dir_path: Path,
     skip_ids: Set[str],
+    start_year_yy: Optional[int] = None,
+    end_year_yy: Optional[int] = None,
     first_n_files: Optional[int] = None,
 ) -> int:
     if not dir_path.exists() or not dir_path.is_dir():
@@ -289,6 +363,8 @@ def count_pending_structured_filings(
             json_files = sorted(id_dir.glob("*.json"))
             for fp in json_files:
                 filing_id = fp.stem
+                if not matches_accession_year_filter(filing_id, start_year_yy, end_year_yy):
+                    continue
                 if filing_id in skip_ids:
                     continue
                 pending_count += 1
@@ -313,6 +389,8 @@ def count_pending_structured_filings(
 def iter_structured_filings(
     dir_path: Path,
     skip_ids: Set[str],
+    start_year_yy: Optional[int] = None,
+    end_year_yy: Optional[int] = None,
     first_n_files: Optional[int] = None,
 ) -> Iterator[Dict[str, Any]]:
     if not dir_path.exists() or not dir_path.is_dir():
@@ -333,6 +411,8 @@ def iter_structured_filings(
             json_files = sorted(id_dir.glob("*.json"))
             for fp in json_files:
                 filing_id = fp.stem
+                if not matches_accession_year_filter(filing_id, start_year_yy, end_year_yy):
+                    continue
                 if filing_id in skip_ids:
                     continue
                 if effective_limit is not None and selected_count >= effective_limit:
@@ -363,15 +443,27 @@ def chunk_transcripts(
         yield batch
 
 
-def append_success_results_to_jsonl(batch_result: List[Dict[str, Any]], path: Path) -> None:
+def append_success_results_to_jsonl(
+    batch_result: List[Dict[str, Any]],
+    path: Path,
+    *,
+    allowed_ids: Optional[Set[str]] = None,
+) -> List[str]:
+    written_ids: List[str] = []
     if not batch_result:
-        return
+        return written_ids
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         for item in batch_result:
-            if "id" not in item:
+            filing_id = item.get("id")
+            if not filing_id:
+                continue
+            if allowed_ids is not None and filing_id not in allowed_ids:
+                logger.warning("Skip writing unexpected id not present in input batch: %s", filing_id)
                 continue
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            written_ids.append(filing_id)
+    return written_ids
 
 
 def append_failed_records_to_jsonl(failed_records: List[Dict[str, Any]], path: Path) -> None:
@@ -578,6 +670,7 @@ async def analyze_transcripts_concurrently(
                 meta = task_meta.pop(done_task, {"size": 0, "ids": []})
                 batch_size = meta.get("size", 0)
                 batch_ids = meta.get("ids", [])
+                items_by_id = meta.get("items_by_id", {})
 
                 try:
                     batch_result = done_task.result()
@@ -613,9 +706,27 @@ async def analyze_transcripts_concurrently(
                         pbar.set_postfix(success=success_count, failed=failed_count)
                     continue
 
-                append_success_results_to_jsonl(batch_result, config.success_jsonl_path)
-                success_count += len(batch_result)
-                failed_count += max(0, batch_size - len(batch_result))
+                written_ids = append_success_results_to_jsonl(
+                    batch_result,
+                    config.success_jsonl_path,
+                    allowed_ids=set(batch_ids),
+                )
+
+                for filing_id in written_ids:
+                    source_item = items_by_id.get(filing_id, {})
+                    write_completion_marker(
+                        config.completion_markers_root,
+                        filing_id,
+                        metadata={
+                            "symbol": source_item.get("symbol"),
+                            "source_file": source_item.get("source_file"),
+                            "result_dir": str(config.results_base_dir),
+                            "timestamp": datetime.utcnow().isoformat() + "Z",
+                        },
+                    )
+
+                success_count += len(written_ids)
+                failed_count += max(0, batch_size - len(written_ids))
 
                 if pbar is not None:
                     pbar.set_postfix(success=success_count, failed=failed_count)
@@ -628,6 +739,7 @@ async def analyze_transcripts_concurrently(
             task_meta[task] = {
                 "size": len(batch),
                 "ids": [item["id"] for item in batch],
+                "items_by_id": {item["id"]: item for item in batch},
             }
 
             if len(pending_tasks) >= config.max_concurrency:
@@ -707,6 +819,11 @@ def convert_success_jsonl_to_parquet(success_jsonl_path: Path, parquet_path: Pat
 
 def main() -> int:
     args = parse_args()
+    try:
+        start_year_yy, end_year_yy = normalize_accession_year_range(args.start_year, args.end_year)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        return 1
     config = build_runtime_config(args)
 
     config.results_base_dir.mkdir(parents=True, exist_ok=True)
@@ -717,22 +834,29 @@ def main() -> int:
     logger.info("Resolved Dify URL: %s", config.dify_api_url)
     logger.info("Resolved model name: %s", config.model_name)
     logger.info("Result directory: %s", config.results_base_dir)
+    logger.info("Completion markers: %s", config.completion_markers_root)
     logger.info("Input directory: %s", config.input_dir)
     logger.info("Prompt file: %s", config.prompt_file)
     logger.info("Max concurrency: %s", config.max_concurrency)
     logger.info("Batch size: %s", config.batch_size)
+    logger.info("Accession year filter: %s", describe_accession_year_filter(start_year_yy, end_year_yy))
 
     prompt_template = load_prompt_template(config.prompt_file)
 
     processed_ids = (
         set()
         if config.reprocess_existing
-        else load_processed_ids_from_jsonl(config.success_jsonl_path)
+        else ensure_completion_markers_from_existing_results(
+            config.completion_markers_root,
+            config.success_jsonl_path,
+        )
     )
 
     pending_total = count_pending_structured_filings(
         config.input_dir,
         processed_ids,
+        start_year_yy=start_year_yy,
+        end_year_yy=end_year_yy,
         first_n_files=config.first_n_files,
     )
 
@@ -744,6 +868,8 @@ def main() -> int:
     transcripts_iter = iter_structured_filings(
         config.input_dir,
         processed_ids,
+        start_year_yy=start_year_yy,
+        end_year_yy=end_year_yy,
         first_n_files=config.first_n_files,
     )
 
@@ -762,8 +888,10 @@ def main() -> int:
     print(f"[SUMMARY] Dify URL   : {config.dify_url_alias} -> {config.dify_api_url}")
     print(f"[SUMMARY] Model name : {config.model_name}")
     print(f"[SUMMARY] Output dir : {config.results_base_dir}")
+    print(f"[SUMMARY] Completion markers: {config.completion_markers_root}")
     print(f"[SUMMARY] Max concurrency: {config.max_concurrency}")
     print(f"[SUMMARY] Batch size: {config.batch_size}")
+    print(f"[SUMMARY] Accession year filter: {describe_accession_year_filter(start_year_yy, end_year_yy)}")
     print(f"[SUMMARY] Newly processed transcripts: {stats['processed']}")
     print(f"[SUMMARY] Success count (this run): {stats['success']}")
     print(f"[SUMMARY] Failed count  (this run): {stats['failed']}")

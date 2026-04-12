@@ -11,6 +11,12 @@ from pathlib import Path
 import sys
 import logging
 
+from accession_year_filter import (
+    describe_accession_year_filter,
+    matches_accession_year_filter,
+    normalize_accession_year_range,
+)
+
 try:
     from tqdm import tqdm
 except ImportError:
@@ -146,6 +152,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only process the first N pending files. Use 0 or a negative value for no limit.",
     )
     parser.add_argument(
+        "--start-year",
+        type=int,
+        default=None,
+        help="Inclusive accession year filter start in YYYY, e.g. 2015.",
+    )
+    parser.add_argument(
+        "--end-year",
+        type=int,
+        default=None,
+        help="Inclusive accession year filter end in YYYY, e.g. 2020.",
+    )
+    parser.add_argument(
         "--max-concurrency",
         type=int,
         default=MAX_CONCURRENCY,
@@ -186,6 +204,7 @@ def build_runtime_paths(
     results_base_dir = output_dir or (DEFAULT_OUTPUT_ROOT / result_dir_name)
     return {
         "results_base_dir": results_base_dir,
+        "completion_markers": results_base_dir / "completion_markers",
         "success_jsonl": results_base_dir / "sentiment_results.jsonl",
         "failed_jsonl": results_base_dir / "failed_transcripts.jsonl",
         "parquet": results_base_dir / "sentiment_results.parquet",
@@ -211,6 +230,31 @@ def setup_logger(log_file_path: Path) -> None:
 
     logger.addHandler(ch)
     logger.addHandler(fh)
+
+
+def completion_marker_path(markers_root: Path, transcript_id: str) -> Path:
+    return markers_root / f"{transcript_id}.done"
+
+
+def write_completion_marker(
+    markers_root: Path,
+    transcript_id: str,
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Path:
+    marker_path = completion_marker_path(markers_root, transcript_id)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"id": transcript_id}
+    if metadata:
+        payload.update(metadata)
+    marker_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return marker_path
+
+
+def load_processed_ids_from_markers(markers_root: Path) -> Set[str]:
+    if not markers_root.exists():
+        return set()
+    return {marker.stem for marker in markers_root.glob("*.done")}
 
 
 # ==========================
@@ -410,6 +454,34 @@ def load_processed_ids(success_jsonl_path: str, parquet_path: str) -> Set[str]:
     return processed_ids
 
 
+def ensure_completion_markers_from_existing_results(
+    markers_root: Path,
+    success_jsonl_path: str,
+    parquet_path: str,
+) -> Set[str]:
+    marker_ids = load_processed_ids_from_markers(markers_root)
+    legacy_ids = load_processed_ids(success_jsonl_path, parquet_path)
+    missing_ids = legacy_ids - marker_ids
+
+    for transcript_id in sorted(missing_ids):
+        write_completion_marker(
+            markers_root,
+            transcript_id,
+            metadata={
+                "created_from": "legacy_success_results",
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            },
+        )
+
+    if missing_ids:
+        logger.info(
+            "Created %s missing completion markers from existing success results.",
+            len(missing_ids),
+        )
+
+    return marker_ids | missing_ids
+
+
 # ==========================
 # 3. 统计 + 流式读取 txt，过滤已处理的
 # ==========================
@@ -417,7 +489,9 @@ def load_processed_ids(success_jsonl_path: str, parquet_path: str) -> Set[str]:
 def count_pending_transcripts(
     dir_path: str,
     skip_ids: Set[str],
-    first_n_files: Optional[int] = None
+    first_n_files: Optional[int] = None,
+    start_year_yy: Optional[int] = None,
+    end_year_yy: Optional[int] = None,
 ) -> int:
     """
     统计 data_form 级目录下待处理 transcript 数量（仅计数，不读取文件内容）。
@@ -445,6 +519,8 @@ def count_pending_transcripts(
             for fp in txt_files:
                 total_txt_files += 1
                 tid = fp.stem
+                if not matches_accession_year_filter(tid, start_year_yy, end_year_yy):
+                    continue
                 if tid in skip_ids:
                     continue
 
@@ -473,7 +549,9 @@ def count_pending_transcripts(
 def iter_transcripts_from_data_form_dir(
     dir_path: str,
     skip_ids: Set[str],
-    first_n_files: Optional[int] = None
+    first_n_files: Optional[int] = None,
+    start_year_yy: Optional[int] = None,
+    end_year_yy: Optional[int] = None,
 ) -> Iterator[Dict[str, Any]]:
     """
     从 data_form 级目录递归流式读取：symbol/id/*.txt。
@@ -498,6 +576,8 @@ def iter_transcripts_from_data_form_dir(
             txt_files = sorted(id_dir.glob("*.txt"))
             for fp in txt_files:
                 tid = fp.stem
+                if not matches_accession_year_filter(tid, start_year_yy, end_year_yy):
+                    continue
                 if tid in skip_ids:
                     continue
 
@@ -544,20 +624,29 @@ def chunk_transcripts(
 
 def append_success_results_to_jsonl(
     batch_result: List[Dict[str, Any]],
-    path: str
-) -> None:
+    path: str,
+    *,
+    allowed_ids: Optional[Set[str]] = None,
+) -> List[str]:
     """
     将一个 batch 的成功结果追加写入 success JSONL。
     每个 item 必须包含 'id' 字段。
     """
+    written_ids: List[str] = []
     if not batch_result:
-        return
+        return written_ids
     with open(path, "a", encoding="utf-8") as f:
         for item in batch_result:
             # 确保有 id
-            if "id" not in item:
+            transcript_id = item.get("id")
+            if not transcript_id:
+                continue
+            if allowed_ids is not None and transcript_id not in allowed_ids:
+                logger.warning("Skip writing unexpected id not present in input batch: %s", transcript_id)
                 continue
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            written_ids.append(transcript_id)
+    return written_ids
 
 
 def append_failed_records_to_jsonl(
@@ -740,6 +829,7 @@ async def analyze_transcripts_concurrently(
     prompt_template: str,
     total_to_process: int,
     success_jsonl_path: str,
+    completion_markers_root: Path,
     runtime_config: RuntimeConfig,
     max_concurrency: int = MAX_CONCURRENCY
 ) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
@@ -776,6 +866,7 @@ async def analyze_transcripts_concurrently(
                 meta = task_meta.pop(done_task, {"size": 0, "ids": []})
                 batch_size = meta.get("size", 0)
                 batch_ids = meta.get("ids", [])
+                items_by_id = meta.get("items_by_id", {})
 
                 try:
                     batch_result = done_task.result()
@@ -806,10 +897,27 @@ async def analyze_transcripts_concurrently(
                         pbar.set_postfix(success=success_count, failed=failed_count)
                     continue
 
-                append_success_results_to_jsonl(batch_result, success_jsonl_path)
+                written_ids = append_success_results_to_jsonl(
+                    batch_result,
+                    success_jsonl_path,
+                    allowed_ids=set(batch_ids),
+                )
 
-                success_count += len(batch_result)
-                failed_count += max(0, batch_size - len(batch_result))
+                for transcript_id in written_ids:
+                    source_item = items_by_id.get(transcript_id, {})
+                    write_completion_marker(
+                        completion_markers_root,
+                        transcript_id,
+                        metadata={
+                            "symbol": source_item.get("symbol"),
+                            "source_file": source_item.get("source_file"),
+                            "result_dir": str(completion_markers_root.parent),
+                            "timestamp": datetime.utcnow().isoformat() + "Z",
+                        },
+                    )
+
+                success_count += len(written_ids)
+                failed_count += max(0, batch_size - len(written_ids))
                 if pbar is not None:
                     pbar.set_postfix(success=success_count, failed=failed_count)
 
@@ -828,6 +936,7 @@ async def analyze_transcripts_concurrently(
             task_meta[task] = {
                 "size": len(batch),
                 "ids": [t["id"] for t in batch],
+                "items_by_id": {t["id"]: t for t in batch},
             }
 
             if len(pending_tasks) >= max_concurrency:
@@ -949,6 +1058,11 @@ if __name__ == "__main__":
     first_n_files = args.first_n_files
     if first_n_files is not None and first_n_files <= 0:
         first_n_files = None
+    try:
+        start_year_yy, end_year_yy = normalize_accession_year_range(args.start_year, args.end_year)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(1)
 
     runtime_paths = build_runtime_paths(prompt_file_path, runtime_config.model_name, args.output_dir)
     setup_logger(runtime_paths["log_file"])
@@ -961,11 +1075,14 @@ if __name__ == "__main__":
     logger.info("Using input dir: %s", input_dir)
     logger.info("Using prompt file: %s", prompt_file_path)
     logger.info("Using output dir: %s", runtime_paths["results_base_dir"])
+    logger.info("Completion markers: %s", runtime_paths["completion_markers"])
+    logger.info("Accession year filter: %s", describe_accession_year_filter(start_year_yy, end_year_yy))
 
     # 1）先看之前已经成功的有哪些，跳过
     processed_ids: Set[str] = set()
     if not args.reprocess_existing:
-        processed_ids = load_processed_ids(
+        processed_ids = ensure_completion_markers_from_existing_results(
+            runtime_paths["completion_markers"],
             str(runtime_paths["success_jsonl"]),
             str(runtime_paths["parquet"]),
         )
@@ -975,6 +1092,8 @@ if __name__ == "__main__":
         input_dir,
         processed_ids,
         first_n_files=first_n_files,
+        start_year_yy=start_year_yy,
+        end_year_yy=end_year_yy,
     )
 
     if pending_total <= 0:
@@ -991,6 +1110,8 @@ if __name__ == "__main__":
         input_dir,
         processed_ids,
         first_n_files=first_n_files,
+        start_year_yy=start_year_yy,
+        end_year_yy=end_year_yy,
     )
 
     # 4）并发分析 + 增量写 JSONL
@@ -1000,6 +1121,7 @@ if __name__ == "__main__":
             prompt_template,
             total_to_process=pending_total,
             success_jsonl_path=str(runtime_paths["success_jsonl"]),
+            completion_markers_root=runtime_paths["completion_markers"],
             runtime_config=runtime_config,
             max_concurrency=int(args.max_concurrency),
         )
@@ -1011,6 +1133,8 @@ if __name__ == "__main__":
     print(f"[SUMMARY] Dify URL   : {runtime_config.dify_url_alias} -> {runtime_config.dify_api_url}")
     print(f"[SUMMARY] Model name : {runtime_config.model_name}")
     print(f"[SUMMARY] Output dir : {runtime_paths['results_base_dir']}")
+    print(f"[SUMMARY] Completion markers: {runtime_paths['completion_markers']}")
+    print(f"[SUMMARY] Accession year filter: {describe_accession_year_filter(start_year_yy, end_year_yy)}")
     print(f"[SUMMARY] Newly processed transcripts: {stats['processed']}")
     print(f"[SUMMARY] Success count (this run): {stats['success']}")
     print(f"[SUMMARY] Failed count  (this run): {stats['failed']}")
