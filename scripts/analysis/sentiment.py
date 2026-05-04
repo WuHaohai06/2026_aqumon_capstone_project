@@ -11,7 +11,10 @@ from pathlib import Path
 import sys
 import logging
 
-from accession_year_filter import (
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from scripts.utils.accession_year_filter import (
     describe_accession_year_filter,
     matches_accession_year_filter,
     normalize_accession_year_range,
@@ -37,7 +40,7 @@ GEMINI_BATCH_DIFY_API_KEY = "app-4sV7yFdvPuhiE0XSg4G4usAg"
 GPT_DIFY_API_KEY = "app-SMU26wd8bd1VmfJTyhP2moe4"
 
 # 根目录与数据表单目录配置
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_FORM = "4"
 
 # 数据目录：repo_root/data

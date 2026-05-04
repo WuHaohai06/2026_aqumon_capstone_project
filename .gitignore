@@ -1,3 +1,21 @@
 # Ignore local data and experiment outputs
 /data/
 /test_batch_size/
+
+# Local Python environments
+.venv/
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+
+# Notebook artifacts
+.ipynb_checkpoints/
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Local scratch files
+/filing_metadata.csv

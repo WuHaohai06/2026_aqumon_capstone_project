@@ -12,7 +12,10 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
 import pandas as pd
 
-from accession_year_filter import (
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from scripts.utils.accession_year_filter import (
     describe_accession_year_filter,
     matches_accession_year_filter,
     normalize_accession_year_range,
@@ -24,7 +27,7 @@ except ImportError:
     tqdm = None
 
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_FORM = "4"
 DATA_DIR = REPO_ROOT / "data"
 PROMPTS_DIR = REPO_ROOT / "prompts"
@@ -35,7 +38,7 @@ GEMINI_DIFY_API_KEY = "app-mtVKZmpWyEOabRYkOR4WihPu"
 GEMINI_BATCH_DIFY_API_KEY = "app-4sV7yFdvPuhiE0XSg4G4usAg"
 GPT_DIFY_API_KEY = "app-SMU26wd8bd1VmfJTyhP2moe4"
 
-DEFAULT_INPUT_DIR = DATA_DIR / "results" / DATA_FORM / "4_extraction_v1" / "structured_json"
+DEFAULT_INPUT_DIR = DATA_DIR / "results" / DATA_FORM / "4_extraction_v1_gemini" / "structured_json"
 DEFAULT_PROMPT_FILE = PROMPTS_DIR / "4_golden_structured_input.txt"
 DEFAULT_MAX_CONCURRENCY = 4
 DEFAULT_MAX_RETRIES = 1

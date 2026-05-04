@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 import aiohttp
-from accession_year_filter import (
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from scripts.utils.accession_year_filter import (
     describe_accession_year_filter,
     matches_accession_year_filter,
     normalize_accession_year_range,
@@ -25,11 +28,10 @@ except ImportError:
     tqdm = None
 
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_FORM = "4"
 DATA_DIR = REPO_ROOT / "data"
-# DEFAULT_INPUT_DIR = DATA_DIR / "raw_data" / DATA_FORM
-DEFAULT_INPUT_DIR = "D:\\AQUMON\\data\\golden_dataset_engine\\extracted_raw_data\\4"
+DEFAULT_INPUT_DIR = DATA_DIR / "golden_dataset_engine" / "extracted_raw_data" / DATA_FORM
 PROMPTS_DIR = REPO_ROOT / "prompts"
 DEFAULT_PROMPT_FILE = PROMPTS_DIR / "4_extraction_v1.txt"
 DEFAULT_OUTPUT_ROOT = DATA_DIR / "results" / DATA_FORM
@@ -90,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
         f"{name} -> {url}" for name, url in sorted(DIFY_URL_ALIASES.items())
     )
     parser = argparse.ArgumentParser(
-        description="Parse Form 4 txt filings into structured JSON files using the same Dify interface as sentiment.py."
+        description="Parse Form 4 txt filings into structured JSON files using the same Dify interface as scripts/analysis/sentiment.py."
     )
     parser.add_argument(
         "--dify-api",

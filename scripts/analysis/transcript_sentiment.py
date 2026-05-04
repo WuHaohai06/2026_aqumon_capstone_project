@@ -23,11 +23,12 @@ DIFY_API_URL = "http://192.168.10.97/v1/workflows/run"
 DIFY_API_KEY = "app-mtVKZmpWyEOabRYkOR4WihPu"
 
 # 根目录与数据表单目录配置
-ROOT_DIR = "./data"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ROOT_DIR = REPO_ROOT / "data"
 DATA_FORM = "4"
 
 # 输入为 data_forms 级目录：root_dir/raw_data/data_forms
-DATA_FORM_INPUT_DIR = str(Path(ROOT_DIR) / "raw_data" / DATA_FORM)
+DATA_FORM_INPUT_DIR = str(ROOT_DIR / "raw_data" / DATA_FORM)
 
 # 最大并发请求数（建议 5–20）
 MAX_CONCURRENCY = 10
@@ -39,7 +40,7 @@ MAX_RETRIES = 1
 PROGRESS_BAR_WIDTH = 30
 
 # 输出目录：root_dir/results/data_forms/
-RESULTS_BASE_DIR = Path(ROOT_DIR) / "results" / DATA_FORM
+RESULTS_BASE_DIR = ROOT_DIR / "results" / DATA_FORM
 SUCCESS_RESULTS_JSONL_PATH = str(RESULTS_BASE_DIR / "sentiment_results.jsonl")
 FAILED_LOG_JSONL_PATH = str(RESULTS_BASE_DIR / "failed_transcripts.jsonl")
 OUTPUT_PARQUET_PATH = str(RESULTS_BASE_DIR / "earnings_sentiment.parquet")

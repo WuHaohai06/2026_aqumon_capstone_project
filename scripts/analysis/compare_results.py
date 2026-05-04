@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-
-DEFAULT_BASE_DIR = Path(r"D:\AQUMON\data\results\4")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_BASE_DIR = REPO_ROOT / "data" / "results" / "4"
 
 
 @dataclass(frozen=True)

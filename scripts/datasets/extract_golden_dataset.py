@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 ACCESSION_DASH_RE = re.compile(r"^\d{10}-\d{2}-\d{6}$")
 ACCESSION_NODASH_RE = re.compile(r"^\d{18}$")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def normalize_accession(value: object) -> Optional[str]:
@@ -211,12 +212,11 @@ def write_missing_report(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    repo_root = Path(__file__).resolve().parent
-    default_csv = repo_root / "data" / "golden_dataset_engine" / "golden_data_accession_number.csv"
-    default_raw_root = repo_root / "data" / "raw_data"
-    default_target_root = repo_root / "data" / "golden_dataset_engine" / "extracted_raw_data"
-    default_manifest = repo_root / "data" / "golden_dataset_engine" / "extraction_manifest.csv"
-    default_missing_report = repo_root / "data" / "golden_dataset_engine" / "missing_file_info.csv"
+    default_csv = REPO_ROOT / "data" / "golden_dataset_engine" / "golden_data_accession_number.csv"
+    default_raw_root = REPO_ROOT / "data" / "raw_data"
+    default_target_root = REPO_ROOT / "data" / "golden_dataset_engine" / "extracted_raw_data"
+    default_manifest = REPO_ROOT / "data" / "golden_dataset_engine" / "extraction_manifest.csv"
+    default_missing_report = REPO_ROOT / "data" / "golden_dataset_engine" / "missing_file_info.csv"
 
     parser = argparse.ArgumentParser(
         description="Extract raw filing files listed by accession number into the golden dataset directory."

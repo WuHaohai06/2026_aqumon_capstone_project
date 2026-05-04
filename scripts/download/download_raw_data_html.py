@@ -1,5 +1,5 @@
 """
-Download raw XML attachments from SEC EDGAR filing directories.
+Download raw HTML attachments from SEC EDGAR filing directories.
 
 Supports two modes:
 1. Full ticker universe traversal via SEC submissions.
@@ -24,6 +24,10 @@ try:
     from tqdm import tqdm
 except Exception:
     tqdm = None
+
+
+HTML_EXTENSIONS = (".htm", ".html")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class SecClient:
@@ -124,6 +128,11 @@ def _accession_to_cik(accession_dash):
     if len(digits) < 10:
         raise ValueError(f"Unexpected accession format: {accession_dash}")
     return str(int(digits[:10]))
+
+
+def _has_html_extension(name):
+    lower_name = str(name or "").lower()
+    return lower_name.endswith(HTML_EXTENSIONS)
 
 
 def load_tickers_from_excel(excel_path):
@@ -261,7 +270,7 @@ def get_filing_dir_info(filing_url):
     return base_dir, accession_dash
 
 
-def list_xml_files_in_filing_sec(sec_client, filing_url):
+def list_html_files_in_filing_sec(sec_client, filing_url):
     base_dir, accession_dash = get_filing_dir_info(filing_url)
 
     index_json_url = urljoin(base_dir, "index.json")
@@ -269,13 +278,13 @@ def list_xml_files_in_filing_sec(sec_client, filing_url):
         response = sec_client.get(index_json_url, timeout=30)
         data = response.json()
         items = data.get("directory", {}).get("item", [])
-        xml_urls = [
+        html_urls = [
             urljoin(base_dir, item.get("name", ""))
             for item in items
-            if item.get("name", "").lower().endswith(".xml")
+            if _has_html_extension(item.get("name", ""))
         ]
-        if xml_urls:
-            return xml_urls
+        if html_urls:
+            return html_urls
     except (ValueError, requests.RequestException, RuntimeError):
         pass
 
@@ -283,20 +292,20 @@ def list_xml_files_in_filing_sec(sec_client, filing_url):
     try:
         response = sec_client.get(index_html_url, timeout=30)
         soup = BeautifulSoup(response.text, "html.parser")
-        xml_urls = []
+        html_urls = []
         for link in soup.find_all("a", href=True):
             href = link["href"]
-            if href.lower().endswith(".xml"):
-                xml_urls.append(urljoin(index_html_url, href))
-        return xml_urls
+            if _has_html_extension(href):
+                html_urls.append(urljoin(index_html_url, href))
+        return html_urls
     except (requests.RequestException, RuntimeError):
         return []
 
 
-def download_all_xml_files_sec(sec_client, filing_url, out_dir, skip_existing=True):
+def download_all_html_files_sec(sec_client, filing_url, out_dir, skip_existing=True):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    done_marker = out_dir / ".done"
+    done_marker = out_dir / ".done_html"
     if skip_existing and done_marker.exists():
         return {
             "downloaded": 0,
@@ -307,13 +316,14 @@ def download_all_xml_files_sec(sec_client, filing_url, out_dir, skip_existing=Tr
 
     existing_files = {
         path.name
-        for path in out_dir.glob("*.xml")
+        for pattern in ("*.htm", "*.html")
+        for path in out_dir.glob(pattern)
         if path.is_file() and path.stat().st_size > 0
     }
 
-    xml_urls = list_xml_files_in_filing_sec(sec_client, filing_url)
-    if skip_existing and xml_urls and existing_files:
-        expected = {url.split("/")[-1] for url in xml_urls}
+    html_urls = list_html_files_in_filing_sec(sec_client, filing_url)
+    if skip_existing and html_urls and existing_files:
+        expected = {url.split("/")[-1] for url in html_urls}
         if expected.issubset(existing_files):
             done_marker.write_text("ok", encoding="utf-8")
             return {
@@ -326,7 +336,7 @@ def download_all_xml_files_sec(sec_client, filing_url, out_dir, skip_existing=Tr
     downloaded = []
     skipped = 0
     seen = set()
-    for url in xml_urls:
+    for url in html_urls:
         if url in seen:
             continue
         seen.add(url)
@@ -343,158 +353,13 @@ def download_all_xml_files_sec(sec_client, filing_url, out_dir, skip_existing=Tr
     result = {
         "downloaded": len(downloaded),
         "skipped": skipped,
-        "total": len(xml_urls),
+        "total": len(html_urls),
         "done": False,
     }
     if result["total"] > 0:
         done_marker.write_text("ok", encoding="utf-8")
         result["done"] = True
     return result
-
-
-def download_all_xml_for_ticker(sec_client, ticker, cik, out_root, forms=("8-K",)):
-    filings_total = 0
-    filings_with_xml = 0
-    filings_done = 0
-    xml_total = 0
-    xml_downloaded = 0
-    xml_skipped = 0
-
-    for filing in iter_filings_for_cik(sec_client, cik, forms=forms):
-        filings_total += 1
-        accession_nodash = filing.get("accession_nodash") or filing.get("accessionNumber", "").replace("-", "")
-        if not accession_nodash:
-            continue
-        accession_dash = _to_accession_dash(accession_nodash)
-        form_dir = _form_to_dirname(filing.get("form"))
-        out_dir = Path(out_root) / form_dir / ticker.upper() / accession_dash
-        filing_url = build_filing_url(cik, accession_nodash, filing.get("primaryDocument"))
-        try:
-            result = download_all_xml_files_sec(sec_client, filing_url, out_dir, skip_existing=True)
-            if result.get("done"):
-                filings_done += 1
-            if result["total"] > 0:
-                filings_with_xml += 1
-            xml_total += result["total"]
-            xml_downloaded += result["downloaded"]
-            xml_skipped += result["skipped"]
-        except requests.RequestException:
-            continue
-
-    return {
-        "filings": filings_total,
-        "filings_with_xml": filings_with_xml,
-        "filings_done": filings_done,
-        "xml_total": xml_total,
-        "xml_downloaded": xml_downloaded,
-        "xml_skipped": xml_skipped,
-    }
-
-
-def download_all_xml_for_all_tickers(out_root="downloads", forms=("8-K",), min_delay=0.2, limit_tickers=None, tickers_filter=None):
-    sec_client = SecClient(user_agent="given.family@magnumwm.com", min_delay=min_delay)
-    cache_path = Path(out_root) / "_meta" / "company_tickers.json"
-    tickers = load_company_tickers(sec_client, cache_path=cache_path)
-    tickers = sorted(tickers, key=lambda x: x.get("ticker", ""))
-
-    if tickers_filter:
-        filter_set = {ticker.upper() for ticker in tickers_filter}
-        tickers = [ticker_info for ticker_info in tickers if ticker_info.get("ticker", "").upper() in filter_set]
-
-    if limit_tickers:
-        tickers = tickers[: int(limit_tickers)]
-
-    _progress_write(
-        f"Starting xml download for {len(tickers)} tickers. "
-        f"Output: {out_root} | Forms: {','.join(forms)} | min_delay={min_delay}s"
-    )
-
-    total_tickers = len(tickers)
-    for index, info in enumerate(_iter_with_progress(tickers, total=total_tickers, desc="Tickers"), 1):
-        ticker = info.get("ticker", "")
-        cik = info.get("cik_str", "")
-        if not ticker or not cik:
-            continue
-        try:
-            stats = download_all_xml_for_ticker(
-                sec_client,
-                ticker=ticker,
-                cik=cik,
-                out_root=out_root,
-                forms=forms,
-            )
-            _progress_write(
-                f"[{index}/{total_tickers}] {ticker}: "
-                f"filings {stats['filings']} (done {stats['filings_done']}, with xml {stats['filings_with_xml']}), "
-                f"xml total {stats['xml_total']}, downloaded {stats['xml_downloaded']}, "
-                f"skipped {stats['xml_skipped']}"
-            )
-        except requests.RequestException as exc:
-            _progress_write(f"[{index}/{total_tickers}] {ticker}: failed - {exc}")
-
-
-def _download_ticker_worker(args):
-    ticker, cik, out_root, forms, min_delay = args
-    try:
-        sec_client = SecClient(user_agent="given.family@magnumwm.com", min_delay=min_delay)
-        stats = download_all_xml_for_ticker(
-            sec_client=sec_client,
-            ticker=ticker,
-            cik=cik,
-            out_root=out_root,
-            forms=forms,
-        )
-        return ticker, stats, None
-    except Exception as exc:
-        return ticker, None, str(exc)
-
-
-def download_all_xml_for_all_tickers_mp(
-    out_root="downloads",
-    forms=("8-K",),
-    min_delay=0.2,
-    limit_tickers=None,
-    tickers_filter=None,
-    num_workers=4,
-):
-    sec_client = SecClient(user_agent="given.family@magnumwm.com", min_delay=min_delay)
-    cache_path = Path(out_root) / "_meta" / "company_tickers.json"
-    tickers = load_company_tickers(sec_client, cache_path=cache_path)
-    tickers = sorted(tickers, key=lambda x: x.get("ticker", ""))
-
-    if tickers_filter:
-        filter_set = {ticker.upper() for ticker in tickers_filter}
-        tickers = [ticker_info for ticker_info in tickers if ticker_info.get("ticker", "").upper() in filter_set]
-
-    if limit_tickers:
-        tickers = tickers[: int(limit_tickers)]
-
-    tasks = []
-    for info in tickers:
-        ticker = info.get("ticker", "")
-        cik = info.get("cik_str", "")
-        if ticker and cik:
-            tasks.append((ticker, cik, out_root, forms, min_delay))
-
-    _progress_write(
-        f"Starting xml download with {num_workers} workers for {len(tasks)} tickers. "
-        f"Output: {out_root} | Forms: {','.join(forms)} | min_delay={min_delay}s"
-    )
-
-    total_tickers = len(tasks)
-    with mp.Pool(processes=num_workers) as pool:
-        iterator = pool.imap_unordered(_download_ticker_worker, tasks)
-        for index, result in enumerate(_iter_with_progress(iterator, total=total_tickers, desc="Tickers"), 1):
-            ticker, stats, err = result
-            if err:
-                _progress_write(f"[{index}/{total_tickers}] {ticker}: failed - {err}")
-                continue
-            _progress_write(
-                f"[{index}/{total_tickers}] {ticker}: "
-                f"filings {stats['filings']} (done {stats['filings_done']}, with xml {stats['filings_with_xml']}), "
-                f"xml total {stats['xml_total']}, downloaded {stats['xml_downloaded']}, "
-                f"skipped {stats['xml_skipped']}"
-            )
 
 
 def iter_dataset_filing_entries(source_root, forms=None):
@@ -522,79 +387,39 @@ def iter_dataset_filing_entries(source_root, forms=None):
                 }
 
 
-def download_xml_for_dataset_entry(sec_client, entry, out_root):
+def download_html_for_dataset_entry(sec_client, entry, out_root):
     filing_url = build_filing_url(entry["cik"], entry["accession_nodash"], None)
     out_dir = entry["source_dir"] if out_root is None else Path(out_root) / entry["form"] / entry["ticker"] / entry["accession_dash"]
-    result = download_all_xml_files_sec(sec_client, filing_url, out_dir, skip_existing=True)
+    result = download_all_html_files_sec(sec_client, filing_url, out_dir, skip_existing=True)
     result["out_dir"] = str(out_dir)
     return result
-
-
-def download_xml_for_dataset_dirs(source_root, out_root, forms=None, min_delay=0.2):
-    sec_client = SecClient(user_agent="given.family@magnumwm.com", min_delay=min_delay)
-    entries = list(iter_dataset_filing_entries(source_root, forms=forms) or [])
-    _progress_write(
-        f"Starting golden-dataset xml download for {len(entries)} filings. "
-        f"Source: {source_root} | Output: {out_root} | Forms: {','.join(forms) if forms else 'ALL'} | min_delay={min_delay}s"
-    )
-
-    summary = {
-        "filings": len(entries),
-        "filings_with_xml": 0,
-        "filings_done": 0,
-        "xml_total": 0,
-        "xml_downloaded": 0,
-        "xml_skipped": 0,
-    }
-    for index, entry in enumerate(_iter_with_progress(entries, total=len(entries), desc="Filings"), 1):
-        try:
-            result = download_xml_for_dataset_entry(sec_client, entry, out_root)
-        except requests.RequestException as exc:
-            _progress_write(
-                f"[{index}/{len(entries)}] {entry['ticker']} {entry['accession_dash']}: failed - {exc}"
-            )
-            continue
-
-        if result.get("done"):
-            summary["filings_done"] += 1
-        if result["total"] > 0:
-            summary["filings_with_xml"] += 1
-        summary["xml_total"] += result["total"]
-        summary["xml_downloaded"] += result["downloaded"]
-        summary["xml_skipped"] += result["skipped"]
-        _progress_write(
-            f"[{index}/{len(entries)}] {entry['ticker']} {entry['accession_dash']}: "
-            f"xml total {result['total']}, downloaded {result['downloaded']}, skipped {result['skipped']}"
-        )
-
-    return summary
 
 
 def _download_dataset_entry_worker(args):
     entry, out_root, min_delay = args
     try:
         sec_client = SecClient(user_agent="given.family@magnumwm.com", min_delay=min_delay)
-        result = download_xml_for_dataset_entry(sec_client, entry, out_root)
+        result = download_html_for_dataset_entry(sec_client, entry, out_root)
         return entry, result, None
     except Exception as exc:
         return entry, None, str(exc)
 
 
-def download_xml_for_dataset_dirs_mp(source_root, out_root, forms=None, min_delay=0.2, num_workers=4):
+def download_html_for_dataset_dirs_mp(source_root, out_root, forms=None, min_delay=0.2, num_workers=4):
     entries = list(iter_dataset_filing_entries(source_root, forms=forms) or [])
     _progress_write(
-        f"Starting golden-dataset xml download with {num_workers} workers for {len(entries)} filings. "
+        f"Starting golden-dataset html download with {num_workers} workers for {len(entries)} filings. "
         f"Source: {source_root} | Output: {out_root} | Forms: {','.join(forms) if forms else 'ALL'} | min_delay={min_delay}s"
     )
 
     tasks = [(entry, out_root, min_delay) for entry in entries]
     summary = {
         "filings": len(entries),
-        "filings_with_xml": 0,
+        "filings_with_html": 0,
         "filings_done": 0,
-        "xml_total": 0,
-        "xml_downloaded": 0,
-        "xml_skipped": 0,
+        "html_total": 0,
+        "html_downloaded": 0,
+        "html_skipped": 0,
     }
     with mp.Pool(processes=num_workers) as pool:
         iterator = pool.imap_unordered(_download_dataset_entry_worker, tasks)
@@ -609,21 +434,20 @@ def download_xml_for_dataset_dirs_mp(source_root, out_root, forms=None, min_dela
             if stats.get("done"):
                 summary["filings_done"] += 1
             if stats["total"] > 0:
-                summary["filings_with_xml"] += 1
-            summary["xml_total"] += stats["total"]
-            summary["xml_downloaded"] += stats["downloaded"]
-            summary["xml_skipped"] += stats["skipped"]
+                summary["filings_with_html"] += 1
+            summary["html_total"] += stats["total"]
+            summary["html_downloaded"] += stats["downloaded"]
+            summary["html_skipped"] += stats["skipped"]
             _progress_write(
                 f"[{index}/{len(tasks)}] {entry['ticker']} {entry['accession_dash']}: "
-                f"xml total {stats['total']}, downloaded {stats['downloaded']}, skipped {stats['skipped']}"
+                f"html total {stats['total']}, downloaded {stats['downloaded']}, skipped {stats['skipped']}"
             )
 
     return summary
 
 
 def build_parser():
-    repo_root = Path(__file__).resolve().parent
-    parser = argparse.ArgumentParser(description="Download SEC XML attachments.")
+    parser = argparse.ArgumentParser(description="Download SEC HTML attachments.")
     parser.add_argument(
         "--mode",
         choices=("golden", "all-tickers"),
@@ -633,14 +457,14 @@ def build_parser():
     parser.add_argument(
         "--source-root",
         type=Path,
-        default=repo_root / "data" / "golden_dataset_engine" / "extracted_raw_data",
+        default=REPO_ROOT / "data" / "golden_dataset_engine" / "extracted_raw_data",
         help="Source root for golden mode; existing filing directories under this path define the subset to download.",
     )
     parser.add_argument(
         "--out-root",
         type=Path,
         default=None,
-        help="Output directory. In golden mode, omit this to download XML directly into existing filing folders under --source-root.",
+        help="Output directory. In golden mode, omit this to download HTML directly into existing filing folders under --source-root.",
     )
     parser.add_argument(
         "--forms",
@@ -653,7 +477,7 @@ def build_parser():
     parser.add_argument(
         "--excel-path",
         type=Path,
-        default=repo_root / "us_symbol_list.xlsx",
+        default=REPO_ROOT / "us_symbol_list.xlsx",
         help="Ticker Excel file used only in all-tickers mode.",
     )
     return parser
@@ -664,7 +488,7 @@ def main():
     forms = tuple(args.forms) if args.forms else None
 
     if args.mode == "golden":
-        summary = download_xml_for_dataset_dirs_mp(
+        summary = download_html_for_dataset_dirs_mp(
             source_root=args.source_root,
             out_root=args.out_root,
             forms=forms,
@@ -673,21 +497,17 @@ def main():
         )
         output_target = args.out_root or args.source_root
         print(
-            f"[SUMMARY] filings={summary['filings']} with_xml={summary['filings_with_xml']} "
-            f"downloaded={summary['xml_downloaded']} skipped={summary['xml_skipped']}"
+            f"[SUMMARY] filings={summary['filings']} with_html={summary['filings_with_html']} "
+            f"downloaded={summary['html_downloaded']} skipped={summary['html_skipped']}"
         )
         print(f"[SUMMARY] output={output_target}")
         return 0
 
-    out_root = args.out_root or (Path(__file__).resolve().parent / "data" / "raw_data_xml")
+    out_root = args.out_root or (REPO_ROOT / "data" / "raw_data_html")
     tickers_filter = load_tickers_from_excel(args.excel_path)
     _progress_write(f"Loaded {len(tickers_filter)} tickers from {args.excel_path}")
-    download_all_xml_for_all_tickers_mp(
-        out_root=out_root,
-        forms=forms or ("4",),
-        min_delay=args.min_delay,
-        num_workers=args.num_workers,
-        tickers_filter=tickers_filter,
+    _progress_write(
+        "all-tickers mode is not implemented in this HTML helper yet; use golden mode for validation samples."
     )
     return 0
 

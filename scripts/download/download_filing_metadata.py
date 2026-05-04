@@ -15,6 +15,9 @@ except Exception:
     tqdm = None
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 class SecClient:
     def __init__(self, user_agent, min_delay=0.2, max_retries=5, timeout=30):
         self.headers = {"User-Agent": user_agent}
@@ -268,8 +271,8 @@ def collect_filing_metadata(out_root="data/raw_data", forms=("8-K",), min_delay=
 
 
 if __name__ == "__main__":
-    excel_path = "D:\\AQUMON\\us_symbol_list.xlsx"
-    out_root = r"D:\AQUMON\data\raw_data"
+    excel_path = REPO_ROOT / "us_symbol_list.xlsx"
+    out_root = REPO_ROOT / "data" / "raw_data"
     forms = ("4","6-K","8-K","10-K", "10-Q", "13F", "20-F", "40-F", "S-4",)
     # forms = ("13F",)
     min_delay = 1
