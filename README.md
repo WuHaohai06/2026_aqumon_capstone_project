@@ -50,3 +50,4 @@ uv sync --no-default-groups
 - [scripts/README.md](scripts/README.md)
 - [README_sentiment.md](README_sentiment.md)
 - [README_compare_results.md](README_compare_results.md)
+- [README_EVENT-STUDY-TOOLKIT.md](README_EVENT-STUDY-TOOLKIT.md)
